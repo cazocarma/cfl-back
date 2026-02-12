@@ -1,6 +1,4 @@
-﻿version: '"'"'3.8'"'"'
-
-services:
+﻿services:
   api:
     image: node:20-slim
     working_dir: /app
