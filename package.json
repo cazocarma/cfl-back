@@ -1,0 +1,14 @@
+﻿{
+  "name": "cfl-back",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend base para control de fletes",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
