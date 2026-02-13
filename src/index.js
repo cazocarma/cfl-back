@@ -1,18 +1,23 @@
-﻿const express = require('"'"'express'"'"');
+const { app } = require("./app");
+const { config } = require("./config");
+const { closePool } = require("./db");
 
-const app = express();
-const port = process.env.PORT || 4000;
-
-app.use(express.json());
-
-app.get('"'"'/'"'"', (_req, res) => {
-  res.json({ service: '"'"'cfl-back'"'"', status: '"'"'ok'"'"' });
+const server = app.listen(config.app.port, "0.0.0.0", () => {
+  // eslint-disable-next-line no-console
+  console.log(`cfl-back listening on port ${config.app.port}`);
 });
 
-app.get('"'"'/health'"'"', (_req, res) => {
-  res.status(200).json({ healthy: true });
-});
+async function gracefulShutdown(signal) {
+  // eslint-disable-next-line no-console
+  console.log(`received ${signal}, shutting down`);
+  server.close(async () => {
+    try {
+      await closePool();
+    } finally {
+      process.exit(0);
+    }
+  });
+}
 
-app.listen(port, '"'"'0.0.0.0'"'"', () => {
-  console.log(`cfl-back listening on port ${port}`);
-});
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
