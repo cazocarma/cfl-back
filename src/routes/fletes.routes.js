@@ -34,6 +34,158 @@ function parseRequiredBigInt(value) {
   return parsed;
 }
 
+function normalizeTipoMovimiento(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "PUSH" || normalized === "DESPACHO") {
+    return "PUSH";
+  }
+  if (normalized === "PULL" || normalized === "RETORNO") {
+    return "PULL";
+  }
+  return null;
+}
+
+const LIFECYCLE_STATUS = {
+  DETECTADO: "DETECTADO",
+  ACTUALIZADO: "ACTUALIZADO",
+  ANULADO: "ANULADO",
+  EN_REVISION: "EN_REVISION",
+  COMPLETADO: "COMPLETADO",
+  ASIGNADO_FOLIO: "ASIGNADO_FOLIO",
+  FACTURADO: "FACTURADO",
+};
+
+function normalizeLifecycleStatus(rawStatus) {
+  const normalized = String(rawStatus || "").trim().toUpperCase();
+  if (!normalized) return null;
+
+  if (normalized === "COMPLETO") return LIFECYCLE_STATUS.COMPLETADO;
+  if (normalized === "VALIDADO") return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
+  if (normalized === "CERRADO") return LIFECYCLE_STATUS.FACTURADO;
+
+  if (Object.values(LIFECYCLE_STATUS).includes(normalized)) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function deriveLifecycleStatus({
+  requestedStatus,
+  idFolio,
+  idTipoFlete,
+  idCentroCostoFinal,
+  idDetalleViaje,
+  idMovil,
+  idTarifa,
+  hasDetalles,
+}) {
+  if (requestedStatus === LIFECYCLE_STATUS.ANULADO) {
+    return LIFECYCLE_STATUS.ANULADO;
+  }
+  if (requestedStatus === LIFECYCLE_STATUS.FACTURADO) {
+    return LIFECYCLE_STATUS.FACTURADO;
+  }
+  if (idFolio && Number(idFolio) > 0) {
+    return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
+  }
+
+  const isComplete =
+    Boolean(idTipoFlete) &&
+    Boolean(idCentroCostoFinal) &&
+    Boolean(idDetalleViaje) &&
+    Boolean(idMovil) &&
+    Boolean(idTarifa) &&
+    Boolean(hasDetalles);
+
+  return isComplete ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.EN_REVISION;
+}
+
+async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = null) {
+  const explicitMovilId = parseOptionalBigInt(cabeceraIn.id_movil);
+  if (explicitMovilId) {
+    return explicitMovilId;
+  }
+
+  const idEmpresaTransporte = parseOptionalBigInt(cabeceraIn.id_empresa_transporte);
+  const idChofer = parseOptionalBigInt(cabeceraIn.id_chofer);
+  const idCamion = parseOptionalBigInt(cabeceraIn.id_camion);
+
+  if (!idEmpresaTransporte || !idChofer || !idCamion) {
+    return fallbackMovilId;
+  }
+
+  const lookup = await new sql.Request(transaction)
+    .input("idEmpresa", sql.BigInt, idEmpresaTransporte)
+    .input("idChofer", sql.BigInt, idChofer)
+    .input("idCamion", sql.BigInt, idCamion)
+    .query(`
+      SELECT TOP 1 id_movil
+      FROM [cfl].[CFL_movil]
+      WHERE id_empresa_transporte = @idEmpresa
+        AND id_chofer = @idChofer
+        AND id_camion = @idCamion
+      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_movil ASC;
+    `);
+
+  const existingMovilId = lookup.recordset[0]?.id_movil || null;
+  if (existingMovilId) {
+    return Number(existingMovilId);
+  }
+
+  const created = await new sql.Request(transaction)
+    .input("idEmpresa", sql.BigInt, idEmpresaTransporte)
+    .input("idChofer", sql.BigInt, idChofer)
+    .input("idCamion", sql.BigInt, idCamion)
+    .input("activo", sql.Bit, true)
+    .input("createdAt", sql.DateTime2(0), now)
+    .input("updatedAt", sql.DateTime2(0), now)
+    .query(`
+      INSERT INTO [cfl].[CFL_movil] (
+        [id_chofer],
+        [id_empresa_transporte],
+        [id_camion],
+        [activo],
+        [created_at],
+        [updated_at]
+      )
+      OUTPUT INSERTED.id_movil
+      VALUES (
+        @idChofer,
+        @idEmpresa,
+        @idCamion,
+        @activo,
+        @createdAt,
+        @updatedAt
+      );
+    `);
+
+  return Number(created.recordset[0].id_movil);
+}
+
+async function resolveFolioForLifecycle(transaction, idFolio) {
+  const parsed = Number(idFolio);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  const result = await new sql.Request(transaction)
+    .input("idFolio", sql.BigInt, parsed)
+    .query(`
+      SELECT TOP 1 folio_numero
+      FROM [cfl].[CFL_folio]
+      WHERE id_folio = @idFolio;
+    `);
+
+  const row = result.recordset[0] || null;
+  if (!row) {
+    return parsed;
+  }
+
+  const numero = String(row.folio_numero || "").trim();
+  return numero === "0" ? null : parsed;
+}
+
 async function fetchCabecera(pool, idCabecera) {
   const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
     SELECT TOP 1 *
@@ -93,13 +245,16 @@ router.post("/manual", async (req, res, next) => {
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoFinal = parseRequiredBigInt(cabeceraIn.id_centro_costo_final);
-  const tipoMovimiento = toNullableTrimmedString(cabeceraIn.tipo_movimiento) || "PUSH";
-  const estado = toNullableTrimmedString(cabeceraIn.estado) || "Completo";
+  const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
+  const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
   const cuentaMayorFinal = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final);
+  const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
+  const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
+  const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
 
   if (!idTipoFlete) {
     res.status(400).json({ error: "Falta id_tipo_flete" });
@@ -109,8 +264,8 @@ router.post("/manual", async (req, res, next) => {
     res.status(400).json({ error: "Falta id_centro_costo_final" });
     return;
   }
-  if (!["PUSH", "PULL"].includes(tipoMovimiento)) {
-    res.status(400).json({ error: "tipo_movimiento invalido (PUSH/PULL)" });
+  if (!tipoMovimiento) {
+    res.status(400).json({ error: "tipo_movimiento invalido (Despacho/Retorno)" });
     return;
   }
   if (!fechaSalida) {
@@ -130,10 +285,22 @@ router.post("/manual", async (req, res, next) => {
     await transaction.begin();
 
     const now = new Date();
+    const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
+    const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
+    const estado = deriveLifecycleStatus({
+      requestedStatus,
+      idFolio: lifecycleFolioId,
+      idTipoFlete,
+      idCentroCostoFinal,
+      idDetalleViaje,
+      idMovil,
+      idTarifa,
+      hasDetalles: detallesIn.length > 0,
+    });
 
     const insertCabeceraReq = new sql.Request(transaction);
-    insertCabeceraReq.input("idDetalleViaje", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_detalle_viaje));
-    insertCabeceraReq.input("idFolio", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_folio));
+    insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
+    insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.sap_numero_entrega_sugerido));
     insertCabeceraReq.input("sapCodigoTipoFleteSug", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete_sugerido));
     insertCabeceraReq.input("sapCentroCostoSug", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo_sugerido));
@@ -144,8 +311,8 @@ router.post("/manual", async (req, res, next) => {
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraReq.input("horaSalida", sql.VarChar(8), horaSalida);
     insertCabeceraReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicado);
-    insertCabeceraReq.input("idMovil", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_movil));
-    insertCabeceraReq.input("idTarifa", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_tarifa));
+    insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
+    insertCabeceraReq.input("idTarifa", sql.BigInt, idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
     insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_usuario_creador));
     insertCabeceraReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
@@ -277,12 +444,16 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoFinal = parseRequiredBigInt(cabeceraIn.id_centro_costo_final);
-  const tipoMovimiento = toNullableTrimmedString(cabeceraIn.tipo_movimiento) || "PUSH";
-  const estado = toNullableTrimmedString(cabeceraIn.estado) || "Completo";
+  const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
+  const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
+  const idDetalleViajeIn = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
+  const idFolioIn = parseOptionalBigInt(cabeceraIn.id_folio);
+  const idTarifaIn = parseOptionalBigInt(cabeceraIn.id_tarifa);
+  const cuentaMayorFinalIn = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final);
 
   if (!idTipoFlete) {
     res.status(400).json({ error: "Falta id_tipo_flete" });
@@ -292,8 +463,8 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
     res.status(400).json({ error: "Falta id_centro_costo_final" });
     return;
   }
-  if (!["PUSH", "PULL"].includes(tipoMovimiento)) {
-    res.status(400).json({ error: "tipo_movimiento invalido (PUSH/PULL)" });
+  if (!tipoMovimiento) {
+    res.status(400).json({ error: "tipo_movimiento invalido (Despacho/Retorno)" });
     return;
   }
   if (!fechaSalida) {
@@ -313,12 +484,43 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
     await transaction.begin();
 
     const now = new Date();
-    const existing = await fetchCabecera(pool, idCabecera);
+    const existingResult = await new sql.Request(transaction)
+      .input("idCabecera", sql.BigInt, idCabecera)
+      .query(`
+        SELECT TOP 1 *
+        FROM [cfl].[CFL_cabecera_flete]
+        WHERE id_cabecera_flete = @idCabecera;
+      `);
+
+    const existing = existingResult.recordset[0] || null;
     if (!existing) {
       await transaction.rollback();
       res.status(404).json({ error: "Cabecera no encontrada" });
       return;
     }
+
+    if (normalizeLifecycleStatus(existing.estado) === LIFECYCLE_STATUS.FACTURADO) {
+      await transaction.rollback();
+      res.status(409).json({ error: "El flete FACTURADO no se puede modificar" });
+      return;
+    }
+
+    const idDetalleViaje = idDetalleViajeIn ?? existing.id_detalle_viaje ?? null;
+    const idFolio = idFolioIn ?? existing.id_folio ?? null;
+    const idTarifa = idTarifaIn ?? existing.id_tarifa ?? null;
+    const idMovil = await resolveMovilId(transaction, cabeceraIn, now, existing.id_movil ?? null);
+    const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
+    const cuentaMayorFinal = cuentaMayorFinalIn ?? (existing.cuenta_mayor_final ? String(existing.cuenta_mayor_final) : null);
+    const estado = deriveLifecycleStatus({
+      requestedStatus,
+      idFolio: lifecycleFolioId,
+      idTipoFlete,
+      idCentroCostoFinal,
+      idDetalleViaje,
+      idMovil,
+      idTarifa,
+      hasDetalles: detallesIn.length > 0,
+    });
 
     await new sql.Request(transaction)
       .input("idCabecera", sql.BigInt, idCabecera)
@@ -328,6 +530,10 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
       .input("horaSalida", sql.VarChar(8), horaSalida)
       .input("montoAplicado", sql.Decimal(18, 2), montoAplicado)
       .input("cuentaMayorFinal", sql.Char(10), cuentaMayorFinal ? cuentaMayorFinal.slice(0, 10) : null)
+      .input("idDetalleViaje", sql.BigInt, idDetalleViaje)
+      .input("idFolio", sql.BigInt, idFolio)
+      .input("idMovil", sql.BigInt, idMovil)
+      .input("idTarifa", sql.BigInt, idTarifa)
       .input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones))
       .input("idTipoFlete", sql.BigInt, idTipoFlete)
       .input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal)
@@ -341,6 +547,10 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
           hora_salida = CAST(@horaSalida AS TIME),
           monto_aplicado = @montoAplicado,
           cuenta_mayor_final = @cuentaMayorFinal,
+          id_detalle_viaje = @idDetalleViaje,
+          id_folio = @idFolio,
+          id_movil = @idMovil,
+          id_tarifa = @idTarifa,
           observaciones = @observaciones,
           id_tipo_flete = @idTipoFlete,
           id_centro_costo_final = @idCentroCostoFinal,

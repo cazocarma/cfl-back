@@ -36,22 +36,32 @@ async function databaseHasCflSchema(pool) {
 }
 
 async function connectWithFallback() {
-  const targetDb = config.db.database;
+  const targetDb = config.db.database || FALLBACK_DATABASE;
+  const normalizedTargetDb = targetDb.toLowerCase();
 
   try {
     const targetPool = await createPool(targetDb);
     const hasSchema = await databaseHasCflSchema(targetPool);
 
-    if (hasSchema || targetDb.toLowerCase() === FALLBACK_DATABASE) {
+    if (hasSchema || normalizedTargetDb === FALLBACK_DATABASE) {
       activeDatabase = targetDb;
       return targetPool;
     }
 
+    // eslint-disable-next-line no-console
+    console.warn(
+      `database "${targetDb}" reachable but schema "cfl" not found; falling back to "${FALLBACK_DATABASE}"`
+    );
     await targetPool.close();
   } catch (error) {
-    if (targetDb.toLowerCase() === FALLBACK_DATABASE) {
+    if (normalizedTargetDb === FALLBACK_DATABASE) {
       throw error;
     }
+
+    // eslint-disable-next-line no-console
+    console.warn(
+      `failed to connect to database "${targetDb}" (${error.message}); falling back to "${FALLBACK_DATABASE}"`
+    );
   }
 
   const fallbackPool = await createPool(FALLBACK_DATABASE);

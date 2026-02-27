@@ -5,6 +5,7 @@ const { getPool, getActiveDatabase } = require("./db");
 const { dashboardRouter } = require("./routes/dashboard.routes");
 const { mantenedoresRouter } = require("./routes/mantenedores.routes");
 const { fletesRouter } = require("./routes/fletes.routes");
+const { authRouter } = require("./routes/auth.routes");
 
 const app = express();
 
@@ -48,6 +49,7 @@ app.get("/health", async (_req, res) => {
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/mantenedores", mantenedoresRouter);
 app.use("/api/fletes", fletesRouter);
+app.use("/api/auth", authRouter);
 
 app.use((error, _req, res, _next) => {
   const message = error && error.message ? error.message : "Error interno del servidor";

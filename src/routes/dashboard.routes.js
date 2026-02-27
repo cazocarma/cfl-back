@@ -1,5 +1,6 @@
 const express = require("express");
 const { getPool, sql } = require("../db");
+const { hasAnyPermission, resolveAuthContext } = require("../authz");
 
 const router = express.Router();
 
@@ -45,6 +46,158 @@ function parseRequiredBigInt(value) {
   }
 
   return parsed;
+}
+
+function normalizeTipoMovimiento(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "PUSH" || normalized === "DESPACHO") {
+    return "PUSH";
+  }
+  if (normalized === "PULL" || normalized === "RETORNO") {
+    return "PULL";
+  }
+  return null;
+}
+
+const LIFECYCLE_STATUS = {
+  DETECTADO: "DETECTADO",
+  ACTUALIZADO: "ACTUALIZADO",
+  ANULADO: "ANULADO",
+  EN_REVISION: "EN_REVISION",
+  COMPLETADO: "COMPLETADO",
+  ASIGNADO_FOLIO: "ASIGNADO_FOLIO",
+  FACTURADO: "FACTURADO",
+};
+
+function normalizeLifecycleStatus(rawStatus) {
+  const normalized = String(rawStatus || "").trim().toUpperCase();
+  if (!normalized) return null;
+
+  if (normalized === "COMPLETO") return LIFECYCLE_STATUS.COMPLETADO;
+  if (normalized === "VALIDADO") return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
+  if (normalized === "CERRADO") return LIFECYCLE_STATUS.FACTURADO;
+
+  if (Object.values(LIFECYCLE_STATUS).includes(normalized)) {
+    return normalized;
+  }
+
+  return null;
+}
+
+function deriveLifecycleStatus({
+  requestedStatus,
+  idFolio,
+  idTipoFlete,
+  idCentroCostoFinal,
+  idDetalleViaje,
+  idMovil,
+  idTarifa,
+  hasDetalles,
+}) {
+  if (requestedStatus === LIFECYCLE_STATUS.ANULADO) {
+    return LIFECYCLE_STATUS.ANULADO;
+  }
+  if (requestedStatus === LIFECYCLE_STATUS.FACTURADO) {
+    return LIFECYCLE_STATUS.FACTURADO;
+  }
+  if (idFolio && Number(idFolio) > 0) {
+    return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
+  }
+
+  const isComplete =
+    Boolean(idTipoFlete) &&
+    Boolean(idCentroCostoFinal) &&
+    Boolean(idDetalleViaje) &&
+    Boolean(idMovil) &&
+    Boolean(idTarifa) &&
+    Boolean(hasDetalles);
+
+  return isComplete ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.EN_REVISION;
+}
+
+async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = null) {
+  const explicitMovilId = parseOptionalBigInt(cabeceraIn.id_movil);
+  if (explicitMovilId) {
+    return explicitMovilId;
+  }
+
+  const idEmpresaTransporte = parseOptionalBigInt(cabeceraIn.id_empresa_transporte);
+  const idChofer = parseOptionalBigInt(cabeceraIn.id_chofer);
+  const idCamion = parseOptionalBigInt(cabeceraIn.id_camion);
+
+  if (!idEmpresaTransporte || !idChofer || !idCamion) {
+    return fallbackMovilId;
+  }
+
+  const lookup = await new sql.Request(transaction)
+    .input("idEmpresa", sql.BigInt, idEmpresaTransporte)
+    .input("idChofer", sql.BigInt, idChofer)
+    .input("idCamion", sql.BigInt, idCamion)
+    .query(`
+      SELECT TOP 1 id_movil
+      FROM [cfl].[CFL_movil]
+      WHERE id_empresa_transporte = @idEmpresa
+        AND id_chofer = @idChofer
+        AND id_camion = @idCamion
+      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_movil ASC;
+    `);
+
+  const existingMovilId = lookup.recordset[0]?.id_movil || null;
+  if (existingMovilId) {
+    return Number(existingMovilId);
+  }
+
+  const created = await new sql.Request(transaction)
+    .input("idEmpresa", sql.BigInt, idEmpresaTransporte)
+    .input("idChofer", sql.BigInt, idChofer)
+    .input("idCamion", sql.BigInt, idCamion)
+    .input("activo", sql.Bit, true)
+    .input("createdAt", sql.DateTime2(0), now)
+    .input("updatedAt", sql.DateTime2(0), now)
+    .query(`
+      INSERT INTO [cfl].[CFL_movil] (
+        [id_chofer],
+        [id_empresa_transporte],
+        [id_camion],
+        [activo],
+        [created_at],
+        [updated_at]
+      )
+      OUTPUT INSERTED.id_movil
+      VALUES (
+        @idChofer,
+        @idEmpresa,
+        @idCamion,
+        @activo,
+        @createdAt,
+        @updatedAt
+      );
+    `);
+
+  return Number(created.recordset[0].id_movil);
+}
+
+async function resolveFolioForLifecycle(transaction, idFolio) {
+  const parsed = Number(idFolio);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  const result = await new sql.Request(transaction)
+    .input("idFolio", sql.BigInt, parsed)
+    .query(`
+      SELECT TOP 1 folio_numero
+      FROM [cfl].[CFL_folio]
+      WHERE id_folio = @idFolio;
+    `);
+
+  const row = result.recordset[0] || null;
+  if (!row) {
+    return parsed;
+  }
+
+  const numero = String(row.folio_numero || "").trim();
+  return numero === "0" ? null : parsed;
 }
 
 function buildMissingDeliveriesQuery(filters) {
@@ -146,7 +299,7 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
 
     const baseQuery = buildMissingDeliveriesQuery(filters);
 
-    const sql = `
+    const sqlQuery = `
       ;WITH ranked_lips AS
       (
         SELECT
@@ -200,8 +353,8 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         id_tipo_flete = tf.id_tipo_flete,
         tipo_flete_nombre = tf.nombre,
         id_centro_costo_final = COALESCE(cc_sap.id_centro_costo, tf.id_centro_costo),
-        -- Semantica: candidatos (aun no existe cabecera) => siempre Detectado.
-        estado = 'Detectado',
+        -- Semantica: candidatos (aun no existe cabecera) => siempre DETECTADO.
+        estado = 'DETECTADO',
         puede_ingresar = CAST(
           CASE
             WHEN tf.id_tipo_flete IS NULL THEN 0
@@ -304,7 +457,7 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
       DROP TABLE #lips_current_pref;
     `;
 
-    const result = await request.query(sql);
+    const result = await request.query(sqlQuery);
     const total = Number(result.recordsets[0][0].total);
     const data = result.recordsets[1];
 
@@ -418,65 +571,159 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
   const page = parsePositiveInt(req.query.page, 1);
   const pageSize = clamp(parsePositiveInt(req.query.page_size, 25), 1, 500);
   const offset = (page - 1) * pageSize;
+  const estadoFiltro = toNullableTrimmedString(req.query.estado);
 
   try {
     const pool = await getPool();
     const request = pool.request();
     request.input("offset", offset);
     request.input("pageSize", pageSize);
+    request.input("estadoFiltro", sql.VarChar(30), estadoFiltro ? estadoFiltro.toUpperCase() : null);
 
-    const sql = `
+    const querySql = `
+      ;WITH detalle_counts AS (
+        SELECT
+          id_cabecera_flete,
+          total_detalles = COUNT_BIG(1)
+        FROM [cfl].[CFL_detalle_flete]
+        GROUP BY id_cabecera_flete
+      ),
+      base AS (
       SELECT
         cf.id_cabecera_flete,
         cf.id_folio,
-        cf.estado,
+        folio_numero = fol.folio_numero,
+        cf.estado AS estado_original,
         cf.tipo_movimiento,
         cf.fecha_salida,
         cf.hora_salida,
         cf.monto_aplicado,
         cf.observaciones,
         cf.id_tipo_flete,
+        cf.id_detalle_viaje,
+        cf.id_movil,
+        cf.id_tarifa,
+        cf.id_cuenta_mayor,
         tf.nombre AS tipo_flete_nombre,
         cf.id_centro_costo_final,
         cc.nombre AS centro_costo_final_nombre,
+        det.total_detalles,
         cf.created_at,
         cf.updated_at,
+        lk.created_at AS sap_updated_at,
 
         e.id_sap_entrega,
-        e.sap_numero_entrega,
+        sap_numero_entrega = NULLIF(LTRIM(RTRIM(e.sap_numero_entrega)), ''),
         e.source_system,
         sap_guia_remision = NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
+        numero_guia = COALESCE(
+          NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
+          NULLIF(LTRIM(RTRIM(cf.sap_numero_entrega_sugerido)), ''),
+          NULLIF(LTRIM(RTRIM(e.sap_numero_entrega)), '')
+        ),
         sap_empresa_transporte = NULLIF(LTRIM(RTRIM(lk.sap_empresa_transporte)), ''),
         sap_nombre_chofer = NULLIF(LTRIM(RTRIM(lk.sap_nombre_chofer)), ''),
         sap_patente = NULLIF(LTRIM(RTRIM(lk.sap_patente)), ''),
-        sap_carro = NULLIF(LTRIM(RTRIM(lk.sap_carro)), '')
-      INTO #base
+        sap_carro = NULLIF(LTRIM(RTRIM(lk.sap_carro)), ''),
+        id_ruta = r.id_ruta,
+        ruta_nombre = NULLIF(LTRIM(RTRIM(r.nombre_ruta)), ''),
+        ruta_origen_nombre = NULLIF(LTRIM(RTRIM(no.nombre)), ''),
+        ruta_destino_nombre = NULLIF(LTRIM(RTRIM(nd.nombre)), ''),
+        movil_empresa = NULLIF(LTRIM(RTRIM(et.razon_social)), ''),
+        movil_chofer_rut = NULLIF(LTRIM(RTRIM(ch.sap_id_fiscal)), ''),
+        movil_chofer_nombre = NULLIF(LTRIM(RTRIM(ch.sap_nombre)), ''),
+        movil_tipo_camion = NULLIF(LTRIM(RTRIM(tc.nombre)), ''),
+        movil_patente = NULLIF(LTRIM(RTRIM(cam.sap_patente)), ''),
+        estado_lifecycle = CASE
+          WHEN UPPER(ISNULL(cf.estado, '')) = 'ANULADO' THEN 'ANULADO'
+          WHEN UPPER(ISNULL(cf.estado, '')) = 'FACTURADO' THEN 'FACTURADO'
+          WHEN COALESCE(cf.id_folio, 0) > 0
+            AND ISNULL(LTRIM(RTRIM(CAST(fol.folio_numero AS NVARCHAR(50)))), '') <> '0'
+            THEN 'ASIGNADO_FOLIO'
+          WHEN lk.created_at IS NOT NULL AND cf.updated_at IS NOT NULL AND lk.created_at > cf.updated_at THEN 'ACTUALIZADO'
+          WHEN cf.id_tipo_flete IS NOT NULL
+            AND cf.id_centro_costo_final IS NOT NULL
+            AND cf.id_detalle_viaje IS NOT NULL
+            AND cf.id_movil IS NOT NULL
+            AND cf.id_tarifa IS NOT NULL
+            AND COALESCE(det.total_detalles, 0) > 0 THEN 'COMPLETADO'
+          ELSE 'EN_REVISION'
+        END
       FROM [cfl].[CFL_cabecera_flete] cf
+      LEFT JOIN [cfl].[CFL_folio] fol ON fol.id_folio = cf.id_folio
       LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
       LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo_final
+      LEFT JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
+      LEFT JOIN [cfl].[CFL_empresa_transporte] et ON et.id_empresa = mv.id_empresa_transporte
+      LEFT JOIN [cfl].[CFL_chofer] ch ON ch.id_chofer = mv.id_chofer
+      LEFT JOIN [cfl].[CFL_camion] cam ON cam.id_camion = mv.id_camion
+      LEFT JOIN [cfl].[CFL_tipo_camion] tc ON tc.id_tipo_camion = cam.id_tipo_camion
+      LEFT JOIN [cfl].[CFL_tarifa] tfa ON tfa.id_tarifa = cf.id_tarifa
+      LEFT JOIN [cfl].[CFL_ruta] r ON r.id_ruta = tfa.id_ruta
+      LEFT JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = r.id_origen_nodo
+      LEFT JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = r.id_destino_nodo
+      LEFT JOIN detalle_counts det ON det.id_cabecera_flete = cf.id_cabecera_flete
       LEFT JOIN [cfl].[CFL_flete_sap_entrega] fe ON fe.id_cabecera_flete = cf.id_cabecera_flete
       LEFT JOIN [cfl].[CFL_sap_entrega] e ON e.id_sap_entrega = fe.id_sap_entrega
       LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
         ON lk.sap_numero_entrega = e.sap_numero_entrega
        AND lk.source_system = e.source_system
-      WHERE cf.estado = 'Completo'
-        AND (cf.id_folio IS NULL OR cf.id_folio = 0);
+      )
 
-      SELECT total = COUNT_BIG(1) FROM #base;
-
-      SELECT *
-      FROM #base
+      SELECT
+        total_rows = COUNT_BIG(1) OVER(),
+        id_cabecera_flete,
+        id_folio,
+        folio_numero,
+        estado = estado_lifecycle,
+        estado_original,
+        tipo_movimiento,
+        fecha_salida,
+        hora_salida,
+        monto_aplicado,
+        observaciones,
+        id_tipo_flete,
+        id_detalle_viaje,
+        id_movil,
+        id_tarifa,
+        id_cuenta_mayor,
+        tipo_flete_nombre,
+        id_centro_costo_final,
+        centro_costo_final_nombre,
+        total_detalles,
+        created_at,
+        updated_at,
+        sap_updated_at,
+        id_sap_entrega,
+        sap_numero_entrega,
+        source_system,
+        sap_guia_remision,
+        numero_guia,
+        sap_empresa_transporte,
+        sap_nombre_chofer,
+        sap_patente,
+        sap_carro,
+        id_ruta,
+        ruta_nombre,
+        ruta_origen_nombre,
+        ruta_destino_nombre,
+        movil_empresa,
+        movil_chofer_rut,
+        movil_chofer_nombre,
+        movil_tipo_camion,
+        movil_patente
+      FROM base
+      WHERE @estadoFiltro IS NULL OR estado_lifecycle = @estadoFiltro
       ORDER BY updated_at DESC, id_cabecera_flete DESC
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
-
-      DROP TABLE #base;
     `;
 
-    const result = await request.query(sql);
-    const total = Number(result.recordsets[0][0].total);
+    const result = await request.query(querySql);
+    const rows = result.recordset || [];
+    const total = rows.length > 0 ? Number(rows[0].total_rows || 0) : 0;
 
     res.json({
-      data: result.recordsets[1],
+      data: rows.map(({ total_rows, ...row }) => row),
       pagination: {
         page,
         page_size: pageSize,
@@ -490,6 +737,22 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
 });
 
 router.post("/folios/asignar", async (req, res, next) => {
+  let auth = null;
+  try {
+    auth = await resolveAuthContext(req);
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  if (!hasAnyPermission(auth, ["folios.asignar", "folios.admin"])) {
+    res.status(403).json({
+      error: "No tienes permisos para asignar folios",
+      role: auth?.primaryRole || null,
+    });
+    return;
+  }
+
   const body = req.body || {};
   const idFolio = Number(body.id_folio);
   const ids = Array.isArray(body.ids_cabecera_flete) ? body.ids_cabecera_flete : [];
@@ -517,7 +780,7 @@ router.post("/folios/asignar", async (req, res, next) => {
     const folioResult = await new sql.Request(transaction)
       .input("idFolio", sql.BigInt, idFolio)
       .query(`
-        SELECT TOP 1 id_folio, bloqueado, estado
+        SELECT TOP 1 id_folio, bloqueado, estado, folio_numero
         FROM [cfl].[CFL_folio]
         WHERE id_folio = @idFolio;
       `);
@@ -535,15 +798,23 @@ router.post("/folios/asignar", async (req, res, next) => {
       return;
     }
 
+    const targetFolioNumero = String(folio.folio_numero || "").trim();
+    const targetFolioIsDefault = targetFolioNumero === "0";
+
     const invalid = [];
 
     for (const idCabecera of cabeceraIds) {
       const rowResult = await new sql.Request(transaction)
         .input("idCabecera", sql.BigInt, idCabecera)
         .query(`
-          SELECT TOP 1 id_cabecera_flete, estado, id_folio
-          FROM [cfl].[CFL_cabecera_flete]
-          WHERE id_cabecera_flete = @idCabecera;
+          SELECT TOP 1
+            cf.id_cabecera_flete,
+            cf.estado,
+            cf.id_folio,
+            folio_numero = f.folio_numero
+          FROM [cfl].[CFL_cabecera_flete] cf
+          LEFT JOIN [cfl].[CFL_folio] f ON f.id_folio = cf.id_folio
+          WHERE cf.id_cabecera_flete = @idCabecera;
         `);
 
       const row = rowResult.recordset[0];
@@ -551,12 +822,17 @@ router.post("/folios/asignar", async (req, res, next) => {
         invalid.push({ id_cabecera_flete: idCabecera, reason: "No existe" });
         continue;
       }
+      const folioNumeroActual = String(row.folio_numero || "").trim();
       const folioValue = row.id_folio === null || row.id_folio === undefined ? 0 : Number(row.id_folio);
-      if (row.estado !== "Completo") {
+      const folioEsDefault = folioNumeroActual === "0";
+      const normalizedEstado = normalizeLifecycleStatus(row.estado);
+      const estadoElegible = normalizedEstado === LIFECYCLE_STATUS.COMPLETADO
+        || (folioEsDefault && normalizedEstado === LIFECYCLE_STATUS.ASIGNADO_FOLIO);
+      if (!estadoElegible) {
         invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.estado}` });
         continue;
       }
-      if (folioValue !== 0) {
+      if (folioValue !== 0 && !folioEsDefault) {
         invalid.push({ id_cabecera_flete: idCabecera, reason: "Ya tiene folio asignado" });
         continue;
       }
@@ -572,11 +848,12 @@ router.post("/folios/asignar", async (req, res, next) => {
       await new sql.Request(transaction)
         .input("idCabecera", sql.BigInt, idCabecera)
         .input("idFolio", sql.BigInt, idFolio)
+        .input("estadoAsignado", sql.VarChar(20), targetFolioIsDefault ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.ASIGNADO_FOLIO)
         .input("updatedAt", sql.DateTime2(0), now)
         .query(`
           UPDATE [cfl].[CFL_cabecera_flete]
           SET id_folio = @idFolio,
-              estado = 'Validado',
+              estado = @estadoAsignado,
               updated_at = @updatedAt
           WHERE id_cabecera_flete = @idCabecera;
         `);
@@ -603,6 +880,301 @@ router.post("/folios/asignar", async (req, res, next) => {
   }
 });
 
+router.post("/folios/asignar-nuevo", async (req, res, next) => {
+  let auth = null;
+  try {
+    auth = await resolveAuthContext(req);
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  if (!hasAnyPermission(auth, ["folios.asignar", "folios.admin"])) {
+    res.status(403).json({
+      error: "No tienes permisos para asignar folios",
+      role: auth?.primaryRole || null,
+    });
+    return;
+  }
+
+  const body = req.body || {};
+  const ids = Array.isArray(body.ids_cabecera_flete) ? body.ids_cabecera_flete : [];
+  const cabeceraIds = ids.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
+  if (cabeceraIds.length === 0) {
+    res.status(400).json({ error: "Debes enviar ids_cabecera_flete" });
+    return;
+  }
+
+  let transaction;
+
+  try {
+    const pool = await getPool();
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    const now = new Date();
+    const invalid = [];
+    const centerCostSet = new Set();
+    const salidaDates = [];
+
+    for (const idCabecera of cabeceraIds) {
+      const rowResult = await new sql.Request(transaction)
+        .input("idCabecera", sql.BigInt, idCabecera)
+        .query(`
+          SELECT TOP 1
+            cf.id_cabecera_flete,
+            cf.estado,
+            cf.id_folio,
+            cf.id_centro_costo_final,
+            cf.fecha_salida,
+            folio_numero = f.folio_numero
+          FROM [cfl].[CFL_cabecera_flete] cf
+          LEFT JOIN [cfl].[CFL_folio] f ON f.id_folio = cf.id_folio
+          WHERE cf.id_cabecera_flete = @idCabecera;
+        `);
+
+      const row = rowResult.recordset[0];
+      if (!row) {
+        invalid.push({ id_cabecera_flete: idCabecera, reason: "No existe" });
+        continue;
+      }
+
+      const folioNumeroActual = String(row.folio_numero || "").trim();
+      const folioValue = row.id_folio === null || row.id_folio === undefined ? 0 : Number(row.id_folio);
+      const folioEsDefault = folioNumeroActual === "0";
+      const normalizedEstado = normalizeLifecycleStatus(row.estado);
+      const estadoElegible = normalizedEstado === LIFECYCLE_STATUS.COMPLETADO
+        || (folioEsDefault && normalizedEstado === LIFECYCLE_STATUS.ASIGNADO_FOLIO);
+
+      if (!estadoElegible) {
+        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.estado}` });
+        continue;
+      }
+      if (folioValue !== 0 && !folioEsDefault) {
+        invalid.push({ id_cabecera_flete: idCabecera, reason: "Ya tiene folio asignado" });
+        continue;
+      }
+
+      const idCentroCosto = Number(row.id_centro_costo_final || 0);
+      if (!Number.isInteger(idCentroCosto) || idCentroCosto <= 0) {
+        invalid.push({ id_cabecera_flete: idCabecera, reason: "Centro de costo invalido" });
+        continue;
+      }
+      centerCostSet.add(idCentroCosto);
+
+      if (row.fecha_salida) {
+        salidaDates.push(new Date(row.fecha_salida));
+      }
+    }
+
+    if (invalid.length > 0) {
+      await transaction.rollback();
+      res.status(422).json({ error: "Hay registros no elegibles", invalid });
+      return;
+    }
+
+    const centerCosts = Array.from(centerCostSet);
+    if (centerCosts.length !== 1) {
+      await transaction.rollback();
+      res.status(422).json({
+        error: "Los movimientos seleccionados deben pertenecer al mismo centro de costo para crear un solo folio",
+        centros_costo: centerCosts,
+      });
+      return;
+    }
+
+    const idCentroCosto = Number(centerCosts[0]);
+
+    const temporadaResult = await new sql.Request(transaction).query(`
+      SELECT TOP 1 id_temporada
+      FROM [cfl].[CFL_temporada]
+      WHERE activa = 1
+      ORDER BY CASE WHEN ISNULL(cerrada, 0) = 0 THEN 0 ELSE 1 END, fecha_inicio DESC, id_temporada DESC;
+    `);
+
+    const idTemporada = Number(temporadaResult.recordset[0]?.id_temporada || 0);
+    if (!Number.isInteger(idTemporada) || idTemporada <= 0) {
+      await transaction.rollback();
+      res.status(409).json({ error: "No existe una temporada activa para crear folio" });
+      return;
+    }
+
+    const nextNumberResult = await new sql.Request(transaction)
+      .input("idTemporada", sql.BigInt, idTemporada)
+      .input("idCentroCosto", sql.BigInt, idCentroCosto)
+      .query(`
+        SELECT
+          next_num = COALESCE(MAX(TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(folio_numero)), ''))), 0) + 1
+        FROM [cfl].[CFL_folio] WITH (UPDLOCK, HOLDLOCK)
+        WHERE id_temporada = @idTemporada
+          AND id_centro_costo = @idCentroCosto
+          AND TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(folio_numero)), '')) IS NOT NULL;
+      `);
+
+    const folioNumero = String(nextNumberResult.recordset[0]?.next_num || "1");
+    const periodoDesde = salidaDates.length > 0
+      ? new Date(Math.min(...salidaDates.map((d) => d.getTime())))
+      : null;
+    const periodoHasta = salidaDates.length > 0
+      ? new Date(Math.max(...salidaDates.map((d) => d.getTime())))
+      : null;
+
+    const createFolioResult = await new sql.Request(transaction)
+      .input("idCentroCosto", sql.BigInt, idCentroCosto)
+      .input("idTemporada", sql.BigInt, idTemporada)
+      .input("folioNumero", sql.VarChar(30), folioNumero)
+      .input("periodoDesde", sql.DateTime2(0), periodoDesde)
+      .input("periodoHasta", sql.DateTime2(0), periodoHasta)
+      .input("estado", sql.VarChar(20), "ABIERTO")
+      .input("bloqueado", sql.Bit, false)
+      .input("createdAt", sql.DateTime2(0), now)
+      .input("updatedAt", sql.DateTime2(0), now)
+      .query(`
+        INSERT INTO [cfl].[CFL_folio] (
+          [id_centro_costo],
+          [id_temporada],
+          [folio_numero],
+          [periodo_desde],
+          [periodo_hasta],
+          [estado],
+          [bloqueado],
+          [created_at],
+          [updated_at]
+        )
+        OUTPUT INSERTED.id_folio
+        VALUES (
+          @idCentroCosto,
+          @idTemporada,
+          @folioNumero,
+          @periodoDesde,
+          @periodoHasta,
+          @estado,
+          @bloqueado,
+          @createdAt,
+          @updatedAt
+        );
+      `);
+
+    const idFolio = Number(createFolioResult.recordset[0]?.id_folio || 0);
+    if (!Number.isInteger(idFolio) || idFolio <= 0) {
+      await transaction.rollback();
+      res.status(500).json({ error: "No se pudo crear el folio" });
+      return;
+    }
+
+    for (const idCabecera of cabeceraIds) {
+      await new sql.Request(transaction)
+        .input("idCabecera", sql.BigInt, idCabecera)
+        .input("idFolio", sql.BigInt, idFolio)
+        .input("estadoAsignado", sql.VarChar(20), LIFECYCLE_STATUS.ASIGNADO_FOLIO)
+        .input("updatedAt", sql.DateTime2(0), now)
+        .query(`
+          UPDATE [cfl].[CFL_cabecera_flete]
+          SET id_folio = @idFolio,
+              estado = @estadoAsignado,
+              updated_at = @updatedAt
+          WHERE id_cabecera_flete = @idCabecera;
+        `);
+    }
+
+    await transaction.commit();
+
+    res.json({
+      message: "Nuevo folio creado y asignado",
+      data: {
+        id_folio: idFolio,
+        folio_numero: folioNumero,
+        id_temporada: idTemporada,
+        id_centro_costo: idCentroCosto,
+        updated: cabeceraIds.length,
+      },
+    });
+  } catch (error) {
+    if (transaction) {
+      try {
+        await transaction.rollback();
+      } catch (_rollbackError) {
+        // no-op
+      }
+    }
+
+    const sqlCode = error?.number || error?.originalError?.info?.number || null;
+    if (sqlCode === 2601 || sqlCode === 2627) {
+      res.status(409).json({ error: "Conflicto al generar folio. Reintenta la asignacion." });
+      return;
+    }
+
+    next(error);
+  }
+});
+
+router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
+  const idCabecera = Number(req.params.id_cabecera_flete);
+  if (!Number.isInteger(idCabecera) || idCabecera <= 0) {
+    res.status(400).json({ error: "id_cabecera_flete invalido" });
+    return;
+  }
+
+  let auth = null;
+  try {
+    auth = await resolveAuthContext(req);
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  if (!hasAnyPermission(auth, ["fletes.editar", "fletes.estado.cambiar", "excepciones.gestionar", "mantenedores.admin"])) {
+    res.status(403).json({
+      error: "No tienes permisos para anular fletes",
+      role: auth?.primaryRole || null,
+    });
+    return;
+  }
+
+  try {
+    const pool = await getPool();
+    const current = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
+      SELECT TOP 1 id_cabecera_flete, estado
+      FROM [cfl].[CFL_cabecera_flete]
+      WHERE id_cabecera_flete = @idCabecera;
+    `);
+
+    const row = current.recordset[0];
+    if (!row) {
+      res.status(404).json({ error: "Cabecera de flete no encontrada" });
+      return;
+    }
+
+    const normalized = normalizeLifecycleStatus(row.estado);
+    if (normalized === LIFECYCLE_STATUS.FACTURADO) {
+      res.status(409).json({ error: "Un flete FACTURADO no se puede anular" });
+      return;
+    }
+
+    await pool
+      .request()
+      .input("idCabecera", sql.BigInt, idCabecera)
+      .input("estado", sql.VarChar(20), LIFECYCLE_STATUS.ANULADO)
+      .input("updatedAt", sql.DateTime2(0), new Date())
+      .query(`
+        UPDATE [cfl].[CFL_cabecera_flete]
+        SET estado = @estado,
+            updated_at = @updatedAt
+        WHERE id_cabecera_flete = @idCabecera;
+      `);
+
+    res.json({
+      message: "Flete anulado",
+      data: {
+        id_cabecera_flete: idCabecera,
+        estado: LIFECYCLE_STATUS.ANULADO,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next) => {
   const idSapEntrega = Number(req.params.id_sap_entrega);
   if (!Number.isInteger(idSapEntrega) || idSapEntrega <= 0) {
@@ -616,12 +1188,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoFinal = parseRequiredBigInt(cabeceraIn.id_centro_costo_final);
-  const tipoMovimiento = toNullableTrimmedString(cabeceraIn.tipo_movimiento) || "PUSH";
-  const estado = toNullableTrimmedString(cabeceraIn.estado) || "Detectado";
+  const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
+  const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
+  const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
+  const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
+  const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
 
   if (!idTipoFlete) {
     res.status(400).json({ error: "Falta id_tipo_flete" });
@@ -631,8 +1206,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     res.status(400).json({ error: "Falta id_centro_costo_final" });
     return;
   }
-  if (!["PUSH", "PULL"].includes(tipoMovimiento)) {
-    res.status(400).json({ error: "tipo_movimiento invalido (PUSH/PULL)" });
+  if (!tipoMovimiento) {
+    res.status(400).json({ error: "tipo_movimiento invalido (Despacho/Retorno)" });
     return;
   }
   if (!fechaSalida) {
@@ -652,6 +1227,18 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     await transaction.begin();
 
     const now = new Date();
+    const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
+    const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
+    const estado = deriveLifecycleStatus({
+      requestedStatus,
+      idFolio: lifecycleFolioId,
+      idTipoFlete,
+      idCentroCostoFinal,
+      idDetalleViaje,
+      idMovil,
+      idTarifa,
+      hasDetalles: detallesIn.length > 0,
+    });
 
     const entregaResult = await new sql.Request(transaction)
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
@@ -698,8 +1285,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const cuentaMayorFinalRaw = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final) || sapCuentaMayor;
 
     const insertCabeceraReq = new sql.Request(transaction);
-    insertCabeceraReq.input("idDetalleViaje", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_detalle_viaje));
-    insertCabeceraReq.input("idFolio", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_folio));
+    insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
+    insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), entrega.sap_numero_entrega);
     insertCabeceraReq.input("sapCodigoTipoFleteSug", sql.Char(4), sapTipoFlete ? sapTipoFlete.slice(0, 4) : null);
     insertCabeceraReq.input("sapCentroCostoSug", sql.Char(10), sapCentroCosto ? sapCentroCosto.slice(0, 10) : null);
@@ -710,8 +1297,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraReq.input("horaSalida", sql.VarChar(8), horaSalida);
     insertCabeceraReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicado);
-    insertCabeceraReq.input("idMovil", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_movil));
-    insertCabeceraReq.input("idTarifa", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_tarifa));
+    insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
+    insertCabeceraReq.input("idTarifa", sql.BigInt, idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
     insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_usuario_creador));
     insertCabeceraReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
@@ -979,7 +1566,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     insertCabeceraRequest.input("sapCuentaMayorSugerida", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
     insertCabeceraRequest.input("cuentaMayorFinal", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
     insertCabeceraRequest.input("tipoMovimiento", sql.VarChar(4), "PUSH");
-    insertCabeceraRequest.input("estado", sql.VarChar(20), "Detectado");
+    insertCabeceraRequest.input("estado", sql.VarChar(20), LIFECYCLE_STATUS.EN_REVISION);
     insertCabeceraRequest.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraRequest.input("horaSalida", sql.VarChar(8), horaSalida);
     insertCabeceraRequest.input("montoAplicado", sql.Decimal(18, 2), 0);

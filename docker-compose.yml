@@ -1,4 +1,4 @@
-﻿services:
+services:
   api:
     image: node:20-slim
     working_dir: /app
@@ -8,6 +8,8 @@
     volumes:
       - .:/app
       - /app/node_modules
+    env_file:
+      - ../cfl-infra/.env
     environment:
       - NODE_ENV=development
       - PORT=4000
