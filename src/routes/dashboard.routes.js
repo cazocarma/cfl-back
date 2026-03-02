@@ -300,33 +300,13 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
     const baseQuery = buildMissingDeliveriesQuery(filters);
 
     const sqlQuery = `
-      ;WITH ranked_lips AS
-      (
-        SELECT
-          r.source_system,
-          r.sap_numero_entrega,
-          r.sap_posicion,
-          r.sap_cantidad_entregada,
-          r.sap_posicion_superior,
-          rn = ROW_NUMBER() OVER
-          (
-            PARTITION BY r.source_system, r.sap_numero_entrega, r.sap_posicion
-            ORDER BY
-              CASE WHEN r.sap_posicion_superior IS NOT NULL THEN 0 ELSE 1 END,
-              r.extracted_at DESC,
-              r.raw_id DESC
-          )
-        FROM [cfl].[CFL_sap_lips_raw] r
-        WHERE r.row_status = 'ACTIVE'
-      )
       SELECT
         source_system,
         sap_numero_entrega,
         sap_posicion,
         sap_cantidad_entregada
       INTO #lips_current_pref
-      FROM ranked_lips
-      WHERE rn = 1;
+      FROM [cfl].[vw_cfl_sap_lips_current];
 
       SELECT
         e.id_sap_entrega,
@@ -524,23 +504,6 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", async (req, res, nex
       .input("sourceSystem", sql.VarChar(50), cabecera.source_system)
       .input("sapNumeroEntrega", sql.VarChar(20), cabecera.sap_numero_entrega)
       .query(`
-        ;WITH ranked AS
-        (
-          SELECT
-            r.*,
-            rn = ROW_NUMBER() OVER
-            (
-              PARTITION BY r.source_system, r.sap_numero_entrega, r.sap_posicion
-              ORDER BY
-                CASE WHEN r.sap_posicion_superior IS NOT NULL THEN 0 ELSE 1 END,
-                r.extracted_at DESC,
-                r.raw_id DESC
-            )
-          FROM [cfl].[CFL_sap_lips_raw] r
-          WHERE r.row_status = 'ACTIVE'
-            AND r.source_system = @sourceSystem
-            AND r.sap_numero_entrega = @sapNumeroEntrega
-        )
         SELECT
           sap_posicion,
           sap_material,
@@ -551,8 +514,9 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", async (req, res, nex
           sap_almacen,
           sap_posicion_superior,
           sap_lote
-        FROM ranked
-        WHERE rn = 1
+        FROM [cfl].[vw_cfl_sap_lips_current]
+        WHERE source_system = @sourceSystem
+          AND sap_numero_entrega = @sapNumeroEntrega
         ORDER BY sap_posicion ASC;
       `);
 
@@ -1197,6 +1161,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
+  const idCuentaMayor = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
 
   if (!idTipoFlete) {
     res.status(400).json({ error: "Falta id_tipo_flete" });
@@ -1281,16 +1246,49 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const sapCuentaMayor = toNullableTrimmedString(entrega.sap_cuenta_mayor);
     const sapTipoFlete = toNullableTrimmedString(entrega.sap_codigo_tipo_flete);
     const sapCentroCosto = toNullableTrimmedString(entrega.sap_centro_costo);
+    const tipoFleteCanonicalResult = await new sql.Request(transaction)
+      .input("idTipoFlete", sql.BigInt, idTipoFlete)
+      .query(`
+        SELECT TOP 1 sap_codigo
+        FROM [cfl].[CFL_tipo_flete]
+        WHERE id_tipo_flete = @idTipoFlete;
+      `);
+    const tipoFleteCanonicoSug = toNullableTrimmedString(tipoFleteCanonicalResult.recordset[0]?.sap_codigo);
 
-    const cuentaMayorFinalRaw = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final) || sapCuentaMayor;
+    const centroCostoCanonicalResult = await new sql.Request(transaction)
+      .input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal)
+      .query(`
+        SELECT TOP 1 sap_codigo
+        FROM [cfl].[CFL_centro_costo]
+        WHERE id_centro_costo = @idCentroCostoFinal;
+      `);
+    const centroCostoCanonicoSug = toNullableTrimmedString(centroCostoCanonicalResult.recordset[0]?.sap_codigo);
+
+    let cuentaMayorCanonicaSug = null;
+    if (idCuentaMayor) {
+      const cuentaMayorCanonicalResult = await new sql.Request(transaction)
+        .input("idCuentaMayor", sql.BigInt, idCuentaMayor)
+        .query(`
+          SELECT TOP 1 codigo
+          FROM [cfl].[CFL_cuenta_mayor]
+          WHERE id_cuenta_mayor = @idCuentaMayor;
+        `);
+      cuentaMayorCanonicaSug = toNullableTrimmedString(cuentaMayorCanonicalResult.recordset[0]?.codigo);
+    }
+
+    const sapTipoFleteSug = sapTipoFlete || tipoFleteCanonicoSug;
+    const sapCentroCostoSug = sapCentroCosto || centroCostoCanonicoSug;
+    const sapCuentaMayorSug = sapCuentaMayor || cuentaMayorCanonicaSug;
+
+    const cuentaMayorFinalRaw = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final) || sapCuentaMayorSug;
 
     const insertCabeceraReq = new sql.Request(transaction);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
     insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), entrega.sap_numero_entrega);
-    insertCabeceraReq.input("sapCodigoTipoFleteSug", sql.Char(4), sapTipoFlete ? sapTipoFlete.slice(0, 4) : null);
-    insertCabeceraReq.input("sapCentroCostoSug", sql.Char(10), sapCentroCosto ? sapCentroCosto.slice(0, 10) : null);
-    insertCabeceraReq.input("sapCuentaMayorSug", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
+    insertCabeceraReq.input("sapCodigoTipoFleteSug", sql.Char(4), sapTipoFleteSug ? sapTipoFleteSug.slice(0, 4) : null);
+    insertCabeceraReq.input("sapCentroCostoSug", sql.Char(10), sapCentroCostoSug ? sapCentroCostoSug.slice(0, 10) : null);
+    insertCabeceraReq.input("sapCuentaMayorSug", sql.Char(10), sapCuentaMayorSug ? sapCuentaMayorSug.slice(0, 10) : null);
     insertCabeceraReq.input("cuentaMayorFinal", sql.Char(10), cuentaMayorFinalRaw ? cuentaMayorFinalRaw.slice(0, 10) : null);
     insertCabeceraReq.input("tipoMovimiento", sql.VarChar(4), tipoMovimiento);
     insertCabeceraReq.input("estado", sql.VarChar(20), estado);
