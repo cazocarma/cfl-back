@@ -1,35 +1,3 @@
-const EMPRESAS_TRANSPORTE_CONFIG = {
-  title: "Empresas de Transporte",
-  table: "[cfl].[CFL_empresa_transporte]",
-  alias: "t",
-  idColumn: "id_empresa",
-  orderBy: "t.razon_social ASC",
-  listColumns: [
-    "t.id_empresa",
-    "t.sap_codigo",
-    "t.rut",
-    "t.razon_social",
-    "t.nombre_rep",
-    "t.correo",
-    "t.telefono",
-    "t.activo",
-    "t.created_at",
-    "t.updated_at"
-  ],
-  create: {
-    required: ["rut"],
-    optional: ["sap_codigo", "razon_social", "nombre_rep", "correo", "telefono", "activo"]
-  },
-  update: {
-    allowed: ["sap_codigo", "rut", "razon_social", "nombre_rep", "correo", "telefono", "activo"]
-  },
-  timestamps: {
-    created: "created_at",
-    updated: "updated_at"
-  },
-  softDeleteColumn: "activo"
-};
-
 const MAINTAINERS = {
   temporadas: {
     title: "Temporadas",
@@ -248,7 +216,37 @@ const MAINTAINERS = {
     },
     softDeleteColumn: "activo"
   },
-  "empresas-transporte": EMPRESAS_TRANSPORTE_CONFIG,
+  "empresas-transporte": {
+    title: "Empresas de Transporte",
+    table: "[cfl].[CFL_empresa_transporte]",
+    alias: "t",
+    idColumn: "id_empresa",
+    orderBy: "t.razon_social ASC",
+    listColumns: [
+      "t.id_empresa",
+      "t.sap_codigo",
+      "t.rut",
+      "t.razon_social",
+      "t.nombre_rep",
+      "t.correo",
+      "t.telefono",
+      "t.activo",
+      "t.created_at",
+      "t.updated_at"
+    ],
+    create: {
+      required: ["rut"],
+      optional: ["sap_codigo", "razon_social", "nombre_rep", "correo", "telefono", "activo"]
+    },
+    update: {
+      allowed: ["sap_codigo", "rut", "razon_social", "nombre_rep", "correo", "telefono", "activo"]
+    },
+    timestamps: {
+      created: "created_at",
+      updated: "updated_at"
+    },
+    softDeleteColumn: "activo"
+  },
   choferes: {
     title: "Choferes",
     table: "[cfl].[CFL_chofer]",

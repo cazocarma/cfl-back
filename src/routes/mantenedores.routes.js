@@ -2,6 +2,7 @@ const express = require("express");
 const { getPool } = require("../db");
 const { MAINTAINERS } = require("../mantenedores-config");
 const { hasAnyPermission, resolveAuthContext } = require("../authz");
+const { normalizeLifecycleStatus } = require("../helpers");
 
 const router = express.Router();
 
@@ -112,13 +113,6 @@ function buildBaseFrom(entityConfig) {
   }
 
   return `${entityConfig.table} ${entityConfig.alias}`;
-}
-
-function normalizeLifecycleStatus(status) {
-  const normalized = String(status || "").trim().toUpperCase();
-  if (normalized === "VALIDADO") return "ASIGNADO_FOLIO";
-  if (normalized === "COMPLETO") return "COMPLETADO";
-  return normalized;
 }
 
 async function fetchFolioEstado(pool, idFolio) {
@@ -601,17 +595,20 @@ router.get("/resumen", async (req, res, next) => {
     }
 
     const pool = await getPool();
-    const summary = [];
 
-    for (const [key, entityConfig] of Object.entries(MAINTAINERS)) {
-      const countSql = `SELECT COUNT_BIG(1) AS total FROM ${entityConfig.table};`;
-      const countResult = await pool.request().query(countSql);
-      summary.push({
-        key,
-        title: entityConfig.title,
-        total: Number(countResult.recordset[0].total),
-      });
-    }
+    // Ejecuta todos los COUNT en paralelo en lugar de secuencialmente (evita N+1)
+    const entries = Object.entries(MAINTAINERS);
+    const counts = await Promise.all(
+      entries.map(([, entityConfig]) =>
+        pool.request().query(`SELECT COUNT_BIG(1) AS total FROM ${entityConfig.table};`)
+      )
+    );
+
+    const summary = entries.map(([key, entityConfig], index) => ({
+      key,
+      title: entityConfig.title,
+      total: Number(counts[index].recordset[0].total),
+    }));
 
     res.json({
       data: summary,
@@ -654,6 +651,48 @@ router.get("/:entity", async (req, res, next) => {
     res.json({
       data: result.recordset,
       total: result.recordset.length,
+      permissions: {
+        role: auth.primaryRole,
+        can_view: true,
+        can_edit: hasAnyPermission(auth, maintainerWritePermissions(permissionEntityKey)),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// [NUEVO ENDPOINT] GET /:entity/:id
+// Expone fetchEntityById como endpoint público. El frontend puede obtener
+// un registro específico sin tener que cargar toda la lista.
+router.get("/:entity/:id", async (req, res, next) => {
+  const entityConfig = requireEntity(req, res);
+  if (!entityConfig) return;
+
+  const id = parseEntityId(req, res, entityConfig);
+  if (id === null) return;
+
+  try {
+    const auth = await resolveAuthContext(req);
+    const permissionEntityKey = normalizePermissionEntityKey(req.params.entity);
+    if (!hasAnyPermission(auth, maintainerReadPermissions(permissionEntityKey))) {
+      res.status(403).json({
+        error: "No tienes permisos para consultar este mantenedor",
+        role: auth?.primaryRole || null,
+        entity: req.params.entity,
+      });
+      return;
+    }
+
+    const pool = await getPool();
+    const row = await fetchEntityById(pool, entityConfig, id);
+    if (!row) {
+      res.status(404).json({ error: `${entityConfig.title} no encontrado` });
+      return;
+    }
+
+    res.json({
+      data: row,
       permissions: {
         role: auth.primaryRole,
         can_view: true,

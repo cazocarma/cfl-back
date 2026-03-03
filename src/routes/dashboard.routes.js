@@ -1,204 +1,21 @@
 const express = require("express");
 const { getPool, sql } = require("../db");
 const { hasAnyPermission, resolveAuthContext } = require("../authz");
+const {
+  clamp,
+  parsePositiveInt,
+  toNullableTrimmedString,
+  parseOptionalBigInt,
+  parseRequiredBigInt,
+  normalizeTipoMovimiento,
+  LIFECYCLE_STATUS,
+  normalizeLifecycleStatus,
+  deriveLifecycleStatus,
+  resolveMovilId,
+  resolveFolioForLifecycle,
+} = require("../helpers");
 
 const router = express.Router();
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function parsePositiveInt(value, fallback) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return fallback;
-  }
-
-  return parsed;
-}
-
-function toNullableTrimmedString(value) {
-  if (typeof value !== "string") {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function parseOptionalBigInt(value) {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
-  }
-
-  return parsed;
-}
-
-function parseRequiredBigInt(value) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
-  }
-
-  return parsed;
-}
-
-function normalizeTipoMovimiento(value) {
-  const normalized = String(value || "").trim().toUpperCase();
-  if (normalized === "PUSH" || normalized === "DESPACHO") {
-    return "PUSH";
-  }
-  if (normalized === "PULL" || normalized === "RETORNO") {
-    return "PULL";
-  }
-  return null;
-}
-
-const LIFECYCLE_STATUS = {
-  DETECTADO: "DETECTADO",
-  ACTUALIZADO: "ACTUALIZADO",
-  ANULADO: "ANULADO",
-  EN_REVISION: "EN_REVISION",
-  COMPLETADO: "COMPLETADO",
-  ASIGNADO_FOLIO: "ASIGNADO_FOLIO",
-  FACTURADO: "FACTURADO",
-};
-
-function normalizeLifecycleStatus(rawStatus) {
-  const normalized = String(rawStatus || "").trim().toUpperCase();
-  if (!normalized) return null;
-
-  if (normalized === "COMPLETO") return LIFECYCLE_STATUS.COMPLETADO;
-  if (normalized === "VALIDADO") return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
-  if (normalized === "CERRADO") return LIFECYCLE_STATUS.FACTURADO;
-
-  if (Object.values(LIFECYCLE_STATUS).includes(normalized)) {
-    return normalized;
-  }
-
-  return null;
-}
-
-function deriveLifecycleStatus({
-  requestedStatus,
-  idFolio,
-  idTipoFlete,
-  idCentroCostoFinal,
-  idDetalleViaje,
-  idMovil,
-  idTarifa,
-  hasDetalles,
-}) {
-  if (requestedStatus === LIFECYCLE_STATUS.ANULADO) {
-    return LIFECYCLE_STATUS.ANULADO;
-  }
-  if (requestedStatus === LIFECYCLE_STATUS.FACTURADO) {
-    return LIFECYCLE_STATUS.FACTURADO;
-  }
-  if (idFolio && Number(idFolio) > 0) {
-    return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
-  }
-
-  const isComplete =
-    Boolean(idTipoFlete) &&
-    Boolean(idCentroCostoFinal) &&
-    Boolean(idDetalleViaje) &&
-    Boolean(idMovil) &&
-    Boolean(idTarifa) &&
-    Boolean(hasDetalles);
-
-  return isComplete ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.EN_REVISION;
-}
-
-async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = null) {
-  const explicitMovilId = parseOptionalBigInt(cabeceraIn.id_movil);
-  if (explicitMovilId) {
-    return explicitMovilId;
-  }
-
-  const idEmpresaTransporte = parseOptionalBigInt(cabeceraIn.id_empresa_transporte);
-  const idChofer = parseOptionalBigInt(cabeceraIn.id_chofer);
-  const idCamion = parseOptionalBigInt(cabeceraIn.id_camion);
-
-  if (!idEmpresaTransporte || !idChofer || !idCamion) {
-    return fallbackMovilId;
-  }
-
-  const lookup = await new sql.Request(transaction)
-    .input("idEmpresa", sql.BigInt, idEmpresaTransporte)
-    .input("idChofer", sql.BigInt, idChofer)
-    .input("idCamion", sql.BigInt, idCamion)
-    .query(`
-      SELECT TOP 1 id_movil
-      FROM [cfl].[CFL_movil]
-      WHERE id_empresa_transporte = @idEmpresa
-        AND id_chofer = @idChofer
-        AND id_camion = @idCamion
-      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_movil ASC;
-    `);
-
-  const existingMovilId = lookup.recordset[0]?.id_movil || null;
-  if (existingMovilId) {
-    return Number(existingMovilId);
-  }
-
-  const created = await new sql.Request(transaction)
-    .input("idEmpresa", sql.BigInt, idEmpresaTransporte)
-    .input("idChofer", sql.BigInt, idChofer)
-    .input("idCamion", sql.BigInt, idCamion)
-    .input("activo", sql.Bit, true)
-    .input("createdAt", sql.DateTime2(0), now)
-    .input("updatedAt", sql.DateTime2(0), now)
-    .query(`
-      INSERT INTO [cfl].[CFL_movil] (
-        [id_chofer],
-        [id_empresa_transporte],
-        [id_camion],
-        [activo],
-        [created_at],
-        [updated_at]
-      )
-      OUTPUT INSERTED.id_movil
-      VALUES (
-        @idChofer,
-        @idEmpresa,
-        @idCamion,
-        @activo,
-        @createdAt,
-        @updatedAt
-      );
-    `);
-
-  return Number(created.recordset[0].id_movil);
-}
-
-async function resolveFolioForLifecycle(transaction, idFolio) {
-  const parsed = Number(idFolio);
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    return null;
-  }
-
-  const result = await new sql.Request(transaction)
-    .input("idFolio", sql.BigInt, parsed)
-    .query(`
-      SELECT TOP 1 folio_numero
-      FROM [cfl].[CFL_folio]
-      WHERE id_folio = @idFolio;
-    `);
-
-  const row = result.recordset[0] || null;
-  if (!row) {
-    return parsed;
-  }
-
-  const numero = String(row.folio_numero || "").trim();
-  return numero === "0" ? null : parsed;
-}
 
 function buildMissingDeliveriesQuery(filters) {
   const whereClauses = [

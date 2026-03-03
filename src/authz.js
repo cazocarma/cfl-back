@@ -162,6 +162,15 @@ async function fetchAuthByUsername(username) {
 }
 
 async function resolveAuthContext(req) {
+  // Prioridad máxima: payload JWT verificado por el middleware
+  if (req.jwtPayload) {
+    const byJwt = await fetchAuthByUserId(req.jwtPayload.id_usuario);
+    if (byJwt) return byJwt;
+    // Fallback: resolver por nombre de rol del token si no hay contexto de usuario
+    const byRole = await fetchAuthByRoleName(req.jwtPayload.role);
+    if (byRole) return byRole;
+  }
+
   const roleName = normalizeText(req.header("x-cfl-role") || req.header("x-user-role") || req.query.role);
   const userId = normalizeText(req.header("x-cfl-user-id") || req.header("x-user-id") || req.query.user_id);
   const username = normalizeText(req.header("x-cfl-username") || req.header("x-username") || req.query.username);

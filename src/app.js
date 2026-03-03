@@ -6,6 +6,7 @@ const { dashboardRouter } = require("./routes/dashboard.routes");
 const { mantenedoresRouter } = require("./routes/mantenedores.routes");
 const { fletesRouter } = require("./routes/fletes.routes");
 const { authRouter } = require("./routes/auth.routes");
+const { jwtMiddleware } = require("./middleware/auth.middleware");
 
 const app = express();
 
@@ -44,6 +45,16 @@ app.get("/health", async (_req, res) => {
       error: error.message,
     });
   }
+});
+
+// Rutas públicas: GET /, GET /health, POST /api/auth/login — sin JWT.
+// Todo lo demás requiere token válido.
+app.use((req, res, next) => {
+  const isPublic =
+    (req.method === "GET" && (req.path === "/" || req.path === "/health")) ||
+    (req.method === "POST" && req.path === "/api/auth/login");
+  if (isPublic) return next();
+  return jwtMiddleware(req, res, next);
 });
 
 app.use("/api/dashboard", dashboardRouter);
