@@ -6,7 +6,9 @@ const { dashboardRouter } = require("./routes/dashboard.routes");
 const { mantenedoresRouter } = require("./routes/mantenedores.routes");
 const { fletesRouter } = require("./routes/fletes.routes");
 const { authRouter } = require("./routes/auth.routes");
+const { operacionesRouter } = require("./routes/operaciones.routes");
 const { jwtMiddleware } = require("./middleware/auth.middleware");
+const { auditMiddleware } = require("./middleware/audit.middleware");
 
 const app = express();
 
@@ -57,9 +59,12 @@ app.use((req, res, next) => {
   return jwtMiddleware(req, res, next);
 });
 
+app.use(auditMiddleware);
+
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/mantenedores", mantenedoresRouter);
 app.use("/api/fletes", fletesRouter);
+app.use("/api/operaciones", operacionesRouter);
 app.use("/api/auth", authRouter);
 
 app.use((error, _req, res, _next) => {

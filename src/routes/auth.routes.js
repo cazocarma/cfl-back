@@ -96,6 +96,14 @@ router.post("/login", async (req, res, next) => {
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "8h" });
 
+    req.auditContext = {
+      userId: payload.id_usuario,
+      action: "login",
+      entity: "auth",
+      idEntidad: payload.id_usuario,
+      summary: `Inicio de sesion exitoso para ${payload.username}`,
+    };
+
     return res.json({
       token,
       user: {

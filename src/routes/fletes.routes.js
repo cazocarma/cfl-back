@@ -16,9 +16,28 @@ const router = express.Router();
 
 async function fetchCabecera(pool, idCabecera) {
   const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
-    SELECT TOP 1 *
-    FROM [cfl].[CFL_cabecera_flete]
-    WHERE id_cabecera_flete = @idCabecera;
+    SELECT TOP 1
+      cf.*,
+      mv.id_empresa_transporte,
+      mv.id_chofer,
+      mv.id_camion,
+      cam.id_tipo_camion,
+      tfa.id_ruta,
+      r.id_origen_nodo,
+      r.id_destino_nodo,
+      ruta_nombre = NULLIF(LTRIM(RTRIM(r.nombre_ruta)), ''),
+      ruta_origen_nombre = NULLIF(LTRIM(RTRIM(no.nombre)), ''),
+      ruta_destino_nombre = NULLIF(LTRIM(RTRIM(nd.nombre)), ''),
+      tarifa_monto_fijo = tfa.monto_fijo,
+      tarifa_moneda = tfa.moneda
+    FROM [cfl].[CFL_cabecera_flete] cf
+    LEFT JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
+    LEFT JOIN [cfl].[CFL_camion] cam ON cam.id_camion = mv.id_camion
+    LEFT JOIN [cfl].[CFL_tarifa] tfa ON tfa.id_tarifa = cf.id_tarifa
+    LEFT JOIN [cfl].[CFL_ruta] r ON r.id_ruta = tfa.id_ruta
+    LEFT JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = r.id_origen_nodo
+    LEFT JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = r.id_destino_nodo
+    WHERE cf.id_cabecera_flete = @idCabecera;
   `);
 
   return result.recordset[0] || null;
