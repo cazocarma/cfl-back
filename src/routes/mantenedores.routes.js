@@ -1,4 +1,5 @@
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const { getPool } = require("../db");
 const { MAINTAINERS } = require("../mantenedores-config");
 const { hasAnyPermission, resolveAuthContext } = require("../authz");
@@ -120,11 +121,15 @@ async function fetchFolioEstado(pool, idFolio) {
     .request()
     .input("idFolio", idFolio)
     .query(`
-      SELECT TOP 1 estado, folio_numero
+      SELECT TOP 1 estado, folio_numero, bloqueado
       FROM [cfl].[CFL_folio]
       WHERE id_folio = @idFolio;
     `);
   return result.recordset[0] || null;
+}
+
+function isFolioBlocked(folio) {
+  return folio?.bloqueado === true || folio?.bloqueado === 1;
 }
 
 async function resolveDefaultFolioId(pool) {
@@ -351,7 +356,7 @@ router.get("/folios/:id/movimientos", async (req, res, next) => {
     const query = `
       SELECT
         cf.id_cabecera_flete,
-        sap_numero_entrega = COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega_sugerido),
+        sap_numero_entrega = COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega),
         se.source_system,
         cf.estado,
         cf.fecha_salida,
@@ -361,7 +366,7 @@ router.get("/folios/:id/movimientos", async (req, res, next) => {
         cc.nombre AS centro_costo_nombre
       FROM [cfl].[CFL_cabecera_flete] cf
       LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
-      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo_final
+      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo
       LEFT JOIN [cfl].[CFL_flete_sap_entrega] fe ON fe.id_cabecera_flete = cf.id_cabecera_flete
       LEFT JOIN [cfl].[CFL_sap_entrega] se ON se.id_sap_entrega = fe.id_sap_entrega
       WHERE cf.id_folio = @idFolio
@@ -417,6 +422,10 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
       res.status(409).json({ error: "Solo se pueden asignar movimientos a folios en estado ABIERTO" });
       return;
     }
+    if (isFolioBlocked(folio)) {
+      res.status(409).json({ error: "El folio esta bloqueado y no permite cambios" });
+      return;
+    }
     const targetFolioNumero = String(folio.folio_numero || "").trim();
     if (targetFolioNumero === "0") {
       res.status(409).json({ error: "El folio 0 es reservado y no permite asignaciones manuales" });
@@ -432,11 +441,11 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
           cf.id_cabecera_flete,
           cf.id_folio,
           cf.estado,
-          sap_numero_entrega = COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega_sugerido)
+          sap_numero_entrega = COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega)
         FROM [cfl].[CFL_cabecera_flete] cf
         LEFT JOIN [cfl].[CFL_flete_sap_entrega] fe ON fe.id_cabecera_flete = cf.id_cabecera_flete
         LEFT JOIN [cfl].[CFL_sap_entrega] se ON se.id_sap_entrega = fe.id_sap_entrega
-        WHERE COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega_sugerido) = @sapNumeroEntrega
+        WHERE COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega) = @sapNumeroEntrega
         ORDER BY cf.updated_at DESC, cf.id_cabecera_flete DESC;
       `);
 
@@ -513,6 +522,10 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
       res.status(409).json({ error: "Solo se pueden desasignar movimientos desde folios ABIERTO" });
       return;
     }
+    if (isFolioBlocked(folio)) {
+      res.status(409).json({ error: "El folio esta bloqueado y no permite cambios" });
+      return;
+    }
 
     const lookup = await pool
       .request()
@@ -577,6 +590,459 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
         id_folio: defaultFolioId,
         estado: targetEstado,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch("/folios/:id/bloqueo", async (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "ID invalido para Folios" });
+    return;
+  }
+
+  try {
+    const auth = await ensureCanWrite(req, res, "folios");
+    if (!auth) return;
+
+    const pool = await getPool();
+    const folio = await fetchFolioEstado(pool, id);
+    if (!folio) {
+      res.status(404).json({ error: "Folio no encontrado" });
+      return;
+    }
+
+    const folioNumero = String(folio.folio_numero || "").trim();
+    if (folioNumero === "0") {
+      res.status(409).json({ error: "El folio 0 es reservado y no se puede bloquear" });
+      return;
+    }
+
+    const bloqueado = req.body?.bloqueado;
+    if (bloqueado === undefined) {
+      res.status(400).json({ error: "Debes enviar el campo bloqueado" });
+      return;
+    }
+
+    const nuevoBloqueado = toBool(bloqueado);
+    const request = pool.request();
+    request.input("id", id);
+    request.input("bloqueado", nuevoBloqueado);
+    request.input("updatedAt", new Date());
+
+    await request.query(`
+      UPDATE [cfl].[CFL_folio]
+      SET
+        [bloqueado] = @bloqueado,
+        [updated_at] = @updatedAt
+      WHERE [id_folio] = @id;
+    `);
+
+    const updatedRow = await fetchEntityById(pool, getEntityConfig("folios"), id);
+    res.json({
+      message: `Folio ${nuevoBloqueado ? "bloqueado" : "desbloqueado"}`,
+      role: auth.primaryRole,
+      data: updatedRow,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Temporada activa ─────────────────────────────────────────────────────────
+router.get("/temporadas/activa", async (req, res, next) => {
+  try {
+    const auth = await resolveAuthContext(req);
+    if (!hasAnyPermission(auth, maintainerReadPermissions("temporadas"))) {
+      res.status(403).json({ error: "Sin permisos para consultar temporadas", role: auth?.primaryRole || null });
+      return;
+    }
+
+    const pool = await getPool();
+    const result = await pool.request().query(`
+      SELECT TOP 1
+        id_temporada, codigo, nombre, fecha_inicio, fecha_fin, activa, cerrada
+      FROM [cfl].[CFL_temporada]
+      WHERE activa = 1 AND cerrada = 0
+      ORDER BY fecha_inicio DESC;
+    `);
+
+    if (!result.recordset[0]) {
+      res.status(404).json({ error: "No hay temporada activa" });
+      return;
+    }
+
+    res.json({ data: result.recordset[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Tarifas con filtro de temporada ──────────────────────────────────────────
+// Debe ir ANTES de router.get('/:entity') para sobreescribir el genérico
+router.get("/tarifas", async (req, res, next) => {
+  const entityConfig = MAINTAINERS["tarifas"];
+
+  try {
+    const auth = await resolveAuthContext(req);
+    if (!hasAnyPermission(auth, maintainerReadPermissions("tarifas"))) {
+      res.status(403).json({ error: "Sin permisos para consultar tarifas", role: auth?.primaryRole || null, entity: "tarifas" });
+      return;
+    }
+
+    const pool = await getPool();
+
+    let temporadaId = req.query.temporada_id ? Number(req.query.temporada_id) : null;
+
+    // Si no se pasó temporada_id, buscar la temporada activa
+    if (!temporadaId) {
+      const activeResult = await pool.request().query(`
+        SELECT TOP 1 id_temporada FROM [cfl].[CFL_temporada]
+        WHERE activa = 1 AND cerrada = 0 ORDER BY fecha_inicio DESC;
+      `);
+      temporadaId = activeResult.recordset[0]?.id_temporada || null;
+    }
+
+    let sql;
+    let request = pool.request();
+
+    if (temporadaId) {
+      request.input("temporadaId", temporadaId);
+      sql = `
+        SELECT ${entityConfig.listColumns.join(", ")}
+        FROM ${buildBaseFrom(entityConfig)}
+        WHERE t.id_temporada = @temporadaId
+        ORDER BY ${entityConfig.orderBy};
+      `;
+    } else {
+      sql = `
+        SELECT ${entityConfig.listColumns.join(", ")}
+        FROM ${buildBaseFrom(entityConfig)}
+        ORDER BY ${entityConfig.orderBy};
+      `;
+    }
+
+    const result = await request.query(sql);
+    res.json({
+      data: result.recordset,
+      total: result.recordset.length,
+      temporada_id: temporadaId || null,
+      permissions: {
+        role: auth.primaryRole,
+        can_view: true,
+        can_edit: hasAnyPermission(auth, maintainerWritePermissions("tarifas")),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Usuarios: obtener roles asignados ────────────────────────────────────────
+router.get("/usuarios/:id/roles", async (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "ID de usuario inválido" });
+    return;
+  }
+
+  try {
+    const auth = await resolveAuthContext(req);
+    if (!hasAnyPermission(auth, maintainerReadPermissions("usuarios"))) {
+      res.status(403).json({ error: "Sin permisos para consultar usuarios", role: auth?.primaryRole || null });
+      return;
+    }
+
+    const pool = await getPool();
+    const result = await pool.request().input("id", id).query(`
+      SELECT r.id_rol, r.nombre, r.descripcion, r.activo
+      FROM [cfl].[CFL_usuario_rol] ur
+      INNER JOIN [cfl].[CFL_rol] r ON r.id_rol = ur.id_rol
+      WHERE ur.id_usuario = @id
+      ORDER BY r.nombre ASC;
+    `);
+
+    res.json({ id_usuario: id, data: result.recordset, total: result.recordset.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Usuarios: asignar rol ────────────────────────────────────────────────────
+router.post("/usuarios/:id/roles", async (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "ID de usuario inválido" });
+    return;
+  }
+
+  const idRol = Number(req.body?.id_rol);
+  if (!Number.isInteger(idRol) || idRol <= 0) {
+    res.status(400).json({ error: "id_rol inválido" });
+    return;
+  }
+
+  try {
+    const auth = await ensureCanWrite(req, res, "usuarios");
+    if (!auth) return;
+
+    const pool = await getPool();
+
+    // Verificar que el usuario existe
+    const userCheck = await pool.request().input("id", id)
+      .query(`SELECT TOP 1 id_usuario FROM [cfl].[CFL_usuario] WHERE id_usuario = @id;`);
+    if (!userCheck.recordset[0]) {
+      res.status(404).json({ error: "Usuario no encontrado" });
+      return;
+    }
+
+    // Verificar que el rol existe
+    const rolCheck = await pool.request().input("idRol", idRol)
+      .query(`SELECT TOP 1 id_rol FROM [cfl].[CFL_rol] WHERE id_rol = @idRol AND activo = 1;`);
+    if (!rolCheck.recordset[0]) {
+      res.status(404).json({ error: "Rol no encontrado o inactivo" });
+      return;
+    }
+
+    // Insertar relación (si no existe)
+    await pool.request()
+      .input("id", id)
+      .input("idRol", idRol)
+      .query(`
+        IF NOT EXISTS (
+          SELECT 1 FROM [cfl].[CFL_usuario_rol] WHERE id_usuario = @id AND id_rol = @idRol
+        )
+        INSERT INTO [cfl].[CFL_usuario_rol] (id_usuario, id_rol) VALUES (@id, @idRol);
+      `);
+
+    res.status(201).json({ message: "Rol asignado al usuario", id_usuario: id, id_rol: idRol });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Usuarios: quitar rol ─────────────────────────────────────────────────────
+router.delete("/usuarios/:id/roles/:id_rol", async (req, res, next) => {
+  const id = Number(req.params.id);
+  const idRol = Number(req.params.id_rol);
+
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(idRol) || idRol <= 0) {
+    res.status(400).json({ error: "IDs inválidos" });
+    return;
+  }
+
+  try {
+    const auth = await ensureCanWrite(req, res, "usuarios");
+    if (!auth) return;
+
+    const pool = await getPool();
+    const result = await pool.request()
+      .input("id", id)
+      .input("idRol", idRol)
+      .query(`
+        DELETE FROM [cfl].[CFL_usuario_rol]
+        WHERE id_usuario = @id AND id_rol = @idRol;
+      `);
+
+    if (result.rowsAffected[0] === 0) {
+      res.status(404).json({ error: "Asignación no encontrada" });
+      return;
+    }
+
+    res.json({ message: "Rol quitado del usuario", id_usuario: id, id_rol: idRol });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Usuarios: toggle estado activo/inactivo ──────────────────────────────────
+router.patch("/usuarios/:id/estado", async (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "ID de usuario inválido" });
+    return;
+  }
+
+  const nuevoEstado = req.body?.activo;
+  if (typeof nuevoEstado !== "boolean" && nuevoEstado !== 0 && nuevoEstado !== 1) {
+    res.status(400).json({ error: "Falta campo 'activo' (boolean)" });
+    return;
+  }
+
+  try {
+    const auth = await ensureCanWrite(req, res, "usuarios");
+    if (!auth) return;
+
+    const pool = await getPool();
+    const result = await pool.request()
+      .input("id", id)
+      .input("activo", toBool(nuevoEstado))
+      .input("updatedAt", new Date())
+      .query(`
+        UPDATE [cfl].[CFL_usuario]
+        SET activo = @activo, updated_at = @updatedAt
+        WHERE id_usuario = @id;
+      `);
+
+    if (result.rowsAffected[0] === 0) {
+      res.status(404).json({ error: "Usuario no encontrado" });
+      return;
+    }
+
+    res.json({ message: "Estado de usuario actualizado", id_usuario: id, activo: toBool(nuevoEstado) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Usuarios: crear con hash bcrypt ──────────────────────────────────────────
+// Debe ir ANTES de router.post('/:entity') para sobreescribir el genérico
+router.post("/usuarios", async (req, res, next) => {
+  try {
+    const auth = await ensureCanWrite(req, res, "usuarios");
+    if (!auth) return;
+
+    const { username, email, password, nombre, apellido, activo, id_rol } = req.body || {};
+
+    if (!username || !email || !password) {
+      res.status(400).json({ error: "Faltan campos requeridos", missing_fields: ["username", "email", "password"].filter(f => !req.body?.[f]) });
+      return;
+    }
+
+    if (password.length < 8) {
+      res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres" });
+      return;
+    }
+
+    const password_hash = await bcrypt.hash(password, 12);
+    const now = new Date();
+
+    const pool = await getPool();
+    const insertResult = await pool.request()
+      .input("username", username)
+      .input("email", email)
+      .input("password_hash", password_hash)
+      .input("nombre", nombre || null)
+      .input("apellido", apellido || null)
+      .input("activo", activo !== undefined ? toBool(activo) : true)
+      .input("createdAt", now)
+      .input("updatedAt", now)
+      .query(`
+        INSERT INTO [cfl].[CFL_usuario]
+          (username, email, password_hash, nombre, apellido, activo, created_at, updated_at)
+        OUTPUT INSERTED.id_usuario AS id
+        VALUES (@username, @email, @password_hash, @nombre, @apellido, @activo, @createdAt, @updatedAt);
+      `);
+
+    const insertedId = insertResult.recordset[0].id;
+
+    // Asignar rol si se proveyó
+    if (id_rol && Number.isInteger(Number(id_rol))) {
+      await pool.request()
+        .input("idUsuario", insertedId)
+        .input("idRol", Number(id_rol))
+        .query(`
+          INSERT INTO [cfl].[CFL_usuario_rol] (id_usuario, id_rol) VALUES (@idUsuario, @idRol);
+        `);
+    }
+
+    // Devolver el usuario creado (sin password_hash)
+    const entityConfig = MAINTAINERS["usuarios"];
+    const insertedRow = await fetchEntityById(pool, entityConfig, insertedId);
+
+    res.status(201).json({
+      message: "Usuario creado",
+      role: auth.primaryRole,
+      data: insertedRow || { id_usuario: insertedId },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Usuarios: editar con hash bcrypt opcional ─────────────────────────────────
+// Debe ir ANTES de router.put('/:entity/:id') para sobreescribir el genérico
+router.put("/usuarios/:id", async (req, res, next) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: "ID de usuario inválido" });
+    return;
+  }
+
+  try {
+    const auth = await ensureCanWrite(req, res, "usuarios");
+    if (!auth) return;
+
+    const { username, email, password, nombre, apellido, activo, id_rol } = req.body || {};
+    const now = new Date();
+
+    // Construir payload excluyendo password_hash (se maneja aparte)
+    const allowedFields = ["username", "email", "nombre", "apellido", "activo"];
+    const payload = collectPayload(req.body || {}, allowedFields);
+
+    // Si se envía password, hacer hash
+    if (password) {
+      if (password.length < 8) {
+        res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres" });
+        return;
+      }
+      payload["password_hash"] = await bcrypt.hash(password, 12);
+    }
+
+    payload["updated_at"] = now;
+
+    const fields = Object.keys(payload);
+    if (fields.length === 0) {
+      res.status(400).json({ error: "No se recibieron campos para actualizar" });
+      return;
+    }
+
+    const pool = await getPool();
+    const request = pool.request();
+    request.input("id", id);
+
+    const setClause = fields.map((fieldName, index) => {
+      request.input(`p${index}`, payload[fieldName]);
+      return `[${fieldName}] = @p${index}`;
+    }).join(", ");
+
+    const updateResult = await request.query(`
+      UPDATE [cfl].[CFL_usuario]
+      SET ${setClause}
+      WHERE id_usuario = @id;
+    `);
+
+    if (updateResult.rowsAffected[0] === 0) {
+      res.status(404).json({ error: "Usuario no encontrado" });
+      return;
+    }
+
+    // Actualizar rol si se proveyó
+    if (id_rol !== undefined && id_rol !== null && id_rol !== "") {
+      const idRolNum = Number(id_rol);
+      if (Number.isInteger(idRolNum) && idRolNum > 0) {
+        // Reemplazar todos los roles del usuario
+        await pool.request().input("id", id).query(`
+          DELETE FROM [cfl].[CFL_usuario_rol] WHERE id_usuario = @id;
+        `);
+        await pool.request()
+          .input("id", id)
+          .input("idRol", idRolNum)
+          .query(`
+            INSERT INTO [cfl].[CFL_usuario_rol] (id_usuario, id_rol) VALUES (@id, @idRol);
+          `);
+      }
+    }
+
+    const entityConfig = MAINTAINERS["usuarios"];
+    const updatedRow = await fetchEntityById(pool, entityConfig, id);
+
+    res.json({
+      message: "Usuario actualizado",
+      role: auth.primaryRole,
+      data: updatedRow,
     });
   } catch (error) {
     next(error);
@@ -762,6 +1228,10 @@ router.post("/:entity", async (req, res, next) => {
     const allowedFields = [...entityConfig.create.required, ...entityConfig.create.optional];
     const payload = collectPayload(req.body || {}, allowedFields);
 
+    if (req.params.entity === "folios" && payload.bloqueado === undefined) {
+      payload.bloqueado = false;
+    }
+
     const missingRequired = entityConfig.create.required.filter(
       (fieldName) =>
         payload[fieldName] === undefined || payload[fieldName] === null || payload[fieldName] === ""
@@ -851,6 +1321,10 @@ router.put("/:entity/:id", async (req, res, next) => {
         res.status(409).json({ error: "El folio 0 es reservado y no se puede modificar" });
         return;
       }
+      if (isFolioBlocked(folio)) {
+        res.status(409).json({ error: "El folio esta bloqueado y no se puede editar" });
+        return;
+      }
     }
 
     const request = pool.request();
@@ -908,6 +1382,10 @@ router.delete("/:entity/:id", async (req, res, next) => {
         const folioNumero = String(folio.folio_numero || "").trim();
         if (folioNumero === "0") {
           res.status(409).json({ error: "El folio 0 es reservado y no se puede eliminar" });
+          return;
+        }
+        if (isFolioBlocked(folio)) {
+          res.status(409).json({ error: "El folio esta bloqueado y no se puede eliminar" });
           return;
         }
       }

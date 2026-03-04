@@ -24,7 +24,83 @@ async function fetchCabecera(pool, idCabecera) {
   return result.recordset[0] || null;
 }
 
+async function fetchSapCurrentDetalles(pool, idCabecera) {
+  const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
+    ;WITH sap_source AS (
+      SELECT
+        fe.created_at AS bridge_created_at,
+        e.id_sap_entrega,
+        e.sap_numero_entrega,
+        e.source_system
+      FROM [cfl].[CFL_flete_sap_entrega] fe
+      INNER JOIN [cfl].[CFL_sap_entrega] e
+        ON e.id_sap_entrega = fe.id_sap_entrega
+      WHERE fe.id_cabecera_flete = @idCabecera
+    ),
+    sap_positions AS (
+      SELECT
+        row_num = ROW_NUMBER() OVER (
+          ORDER BY
+            src.sap_numero_entrega ASC,
+            TRY_CONVERT(INT, NULLIF(LTRIM(RTRIM(lp.sap_posicion)), '')),
+            lp.sap_posicion ASC
+        ),
+        src.bridge_created_at,
+        sap_numero_entrega = src.sap_numero_entrega,
+        sap_posicion = NULLIF(LTRIM(RTRIM(lp.sap_posicion)), ''),
+        sap_material = NULLIF(LTRIM(RTRIM(lp.sap_material)), ''),
+        sap_denominacion_material = NULLIF(LTRIM(RTRIM(lp.sap_denominacion_material)), ''),
+        sap_cantidad_entregada = TRY_CONVERT(DECIMAL(12, 2), lp.sap_cantidad_entregada),
+        sap_unidad_peso = NULLIF(LTRIM(RTRIM(lp.sap_unidad_peso)), ''),
+        sap_posicion_superior = NULLIF(LTRIM(RTRIM(lp.sap_posicion_superior)), ''),
+        sap_lote = NULLIF(LTRIM(RTRIM(lp.sap_lote)), '')
+      FROM sap_source src
+      INNER JOIN [cfl].[vw_cfl_sap_lips_current] lp
+        ON lp.source_system = src.source_system
+       AND lp.sap_numero_entrega = src.sap_numero_entrega
+    ),
+    existing_details AS (
+      SELECT
+        row_num = ROW_NUMBER() OVER (ORDER BY id_detalle_flete ASC),
+        id_especie
+      FROM [cfl].[CFL_detalle_flete]
+      WHERE id_cabecera_flete = @idCabecera
+    )
+    SELECT
+      id_detalle_flete = sp.row_num,
+      id_cabecera_flete = @idCabecera,
+      id_especie = ed.id_especie,
+      material = sp.sap_material,
+      descripcion = sp.sap_denominacion_material,
+      cantidad = sp.sap_cantidad_entregada,
+      unidad = CASE
+        WHEN sp.sap_unidad_peso IS NULL THEN NULL
+        ELSE LEFT(sp.sap_unidad_peso, 3)
+      END,
+      peso = CASE
+        WHEN UPPER(COALESCE(sp.sap_unidad_peso, '')) LIKE 'KG%' THEN TRY_CONVERT(DECIMAL(15, 3), sp.sap_cantidad_entregada)
+        ELSE NULL
+      END,
+      created_at = sp.bridge_created_at,
+      sap_numero_entrega = sp.sap_numero_entrega,
+      sap_posicion = sp.sap_posicion,
+      sap_posicion_superior = sp.sap_posicion_superior,
+      sap_lote = sp.sap_lote
+    FROM sap_positions sp
+    LEFT JOIN existing_details ed
+      ON ed.row_num = sp.row_num
+    ORDER BY sp.row_num ASC;
+  `);
+
+  return result.recordset;
+}
+
 async function fetchDetalles(pool, idCabecera) {
+  const sapCurrentDetalles = await fetchSapCurrentDetalles(pool, idCabecera);
+  if (sapCurrentDetalles.length > 0) {
+    return sapCurrentDetalles;
+  }
+
   const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
     SELECT
       id_detalle_flete,
@@ -72,14 +148,16 @@ router.post("/manual", async (req, res, next) => {
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCostoFinal = parseRequiredBigInt(cabeceraIn.id_centro_costo_final);
+  const idCentroCosto = parseRequiredBigInt(cabeceraIn.id_centro_costo);
   const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
-  const cuentaMayorFinal = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final);
+  // cuenta_mayor_final eliminado (redundante con id_cuenta_mayor FK)
+  const guiaRemision   = toNullableTrimmedString(cabeceraIn.guia_remision);
+  const numeroEntrega  = toNullableTrimmedString(cabeceraIn.numero_entrega);
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
@@ -88,8 +166,8 @@ router.post("/manual", async (req, res, next) => {
     res.status(400).json({ error: "Falta id_tipo_flete" });
     return;
   }
-  if (!idCentroCostoFinal) {
-    res.status(400).json({ error: "Falta id_centro_costo_final" });
+  if (!idCentroCosto) {
+    res.status(400).json({ error: "Falta id_centro_costo" });
     return;
   }
   if (!tipoMovimiento) {
@@ -119,7 +197,7 @@ router.post("/manual", async (req, res, next) => {
       requestedStatus,
       idFolio: lifecycleFolioId,
       idTipoFlete,
-      idCentroCostoFinal,
+      idCentroCosto,
       idDetalleViaje,
       idMovil,
       idTarifa,
@@ -129,11 +207,13 @@ router.post("/manual", async (req, res, next) => {
     const insertCabeceraReq = new sql.Request(transaction);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
     insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
-    insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.sap_numero_entrega_sugerido));
-    insertCabeceraReq.input("sapCodigoTipoFleteSug", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete_sugerido));
-    insertCabeceraReq.input("sapCentroCostoSug", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo_sugerido));
-    insertCabeceraReq.input("sapCuentaMayorSug", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_cuenta_mayor_sugerida));
-    insertCabeceraReq.input("cuentaMayorFinal", sql.Char(10), toNullableTrimmedString(cabeceraIn.cuenta_mayor_final));
+    insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.sap_numero_entrega));
+    insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete));
+    insertCabeceraReq.input("sapCentroCosto", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo));
+    insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_cuenta_mayor));
+    // sap_guia_remision no aplica en flete manual (sin origen SAP)
+    insertCabeceraReq.input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null);
+    insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null);
     insertCabeceraReq.input("tipoMovimiento", sql.VarChar(4), tipoMovimiento);
     insertCabeceraReq.input("estado", sql.VarChar(20), estado);
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
@@ -146,17 +226,18 @@ router.post("/manual", async (req, res, next) => {
     insertCabeceraReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
     insertCabeceraReq.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("updatedAt", sql.DateTime2(0), now);
-    insertCabeceraReq.input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal);
+    insertCabeceraReq.input("idCentroCosto", sql.BigInt, idCentroCosto);
 
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CFL_cabecera_flete] (
         [id_detalle_viaje],
         [id_folio],
-        [sap_numero_entrega_sugerido],
-        [sap_codigo_tipo_flete_sugerido],
-        [sap_centro_costo_sugerido],
-        [sap_cuenta_mayor_sugerida],
-        [cuenta_mayor_final],
+        [sap_numero_entrega],
+        [sap_codigo_tipo_flete],
+        [sap_centro_costo],
+        [sap_cuenta_mayor],
+        [guia_remision],
+        [numero_entrega],
         [tipo_movimiento],
         [estado],
         [fecha_salida],
@@ -169,17 +250,18 @@ router.post("/manual", async (req, res, next) => {
         [id_tipo_flete],
         [created_at],
         [updated_at],
-        [id_centro_costo_final]
+        [id_centro_costo]
       )
       OUTPUT INSERTED.id_cabecera_flete
       VALUES (
         @idDetalleViaje,
         @idFolio,
         @sapNumeroEntrega,
-        @sapCodigoTipoFleteSug,
-        @sapCentroCostoSug,
-        @sapCuentaMayorSug,
-        @cuentaMayorFinal,
+        @sapCodigoTipoFlete,
+        @sapCentroCosto,
+        @sapCuentaMayor,
+        @guiaRemision,
+        @numeroEntrega,
         @tipoMovimiento,
         @estado,
         @fechaSalida,
@@ -192,7 +274,7 @@ router.post("/manual", async (req, res, next) => {
         @idTipoFlete,
         @createdAt,
         @updatedAt,
-        @idCentroCostoFinal
+        @idCentroCosto
       );
     `);
 
@@ -271,7 +353,7 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCostoFinal = parseRequiredBigInt(cabeceraIn.id_centro_costo_final);
+  const idCentroCosto = parseRequiredBigInt(cabeceraIn.id_centro_costo);
   const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
@@ -281,14 +363,16 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
   const idDetalleViajeIn = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idFolioIn = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifaIn = parseOptionalBigInt(cabeceraIn.id_tarifa);
-  const cuentaMayorFinalIn = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final);
+  // cuenta_mayor_final eliminado (redundante con id_cuenta_mayor FK)
+  const guiaRemisionIn   = toNullableTrimmedString(cabeceraIn.guia_remision);
+  const numeroEntregaIn  = toNullableTrimmedString(cabeceraIn.numero_entrega);
 
   if (!idTipoFlete) {
     res.status(400).json({ error: "Falta id_tipo_flete" });
     return;
   }
-  if (!idCentroCostoFinal) {
-    res.status(400).json({ error: "Falta id_centro_costo_final" });
+  if (!idCentroCosto) {
+    res.status(400).json({ error: "Falta id_centro_costo" });
     return;
   }
   if (!tipoMovimiento) {
@@ -338,12 +422,14 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
     const idTarifa = idTarifaIn ?? existing.id_tarifa ?? null;
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now, existing.id_movil ?? null);
     const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
-    const cuentaMayorFinal = cuentaMayorFinalIn ?? (existing.cuenta_mayor_final ? String(existing.cuenta_mayor_final) : null);
+    // cuenta_mayor_final eliminado; usar id_cuenta_mayor (FK) para la cuenta contable
+    const guiaRemision  = guiaRemisionIn  ?? (existing.guia_remision  ? String(existing.guia_remision)  : null);
+    const numeroEntrega = numeroEntregaIn ?? (existing.numero_entrega ? String(existing.numero_entrega) : null);
     const estado = deriveLifecycleStatus({
       requestedStatus,
       idFolio: lifecycleFolioId,
       idTipoFlete,
-      idCentroCostoFinal,
+      idCentroCosto,
       idDetalleViaje,
       idMovil,
       idTarifa,
@@ -357,14 +443,15 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
       .input("fechaSalida", sql.Date, fechaSalida)
       .input("horaSalida", sql.VarChar(8), horaSalida)
       .input("montoAplicado", sql.Decimal(18, 2), montoAplicado)
-      .input("cuentaMayorFinal", sql.Char(10), cuentaMayorFinal ? cuentaMayorFinal.slice(0, 10) : null)
+      .input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null)
+      .input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null)
       .input("idDetalleViaje", sql.BigInt, idDetalleViaje)
       .input("idFolio", sql.BigInt, idFolio)
       .input("idMovil", sql.BigInt, idMovil)
       .input("idTarifa", sql.BigInt, idTarifa)
       .input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones))
       .input("idTipoFlete", sql.BigInt, idTipoFlete)
-      .input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal)
+      .input("idCentroCosto", sql.BigInt, idCentroCosto)
       .input("updatedAt", sql.DateTime2(0), now)
       .query(`
         UPDATE [cfl].[CFL_cabecera_flete]
@@ -374,14 +461,15 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
           fecha_salida = @fechaSalida,
           hora_salida = CAST(@horaSalida AS TIME),
           monto_aplicado = @montoAplicado,
-          cuenta_mayor_final = @cuentaMayorFinal,
+          guia_remision = @guiaRemision,
+          numero_entrega = @numeroEntrega,
           id_detalle_viaje = @idDetalleViaje,
           id_folio = @idFolio,
           id_movil = @idMovil,
           id_tarifa = @idTarifa,
           observaciones = @observaciones,
           id_tipo_flete = @idTipoFlete,
-          id_centro_costo_final = @idCentroCostoFinal,
+          id_centro_costo = @idCentroCosto,
           updated_at = @updatedAt
         WHERE id_cabecera_flete = @idCabecera;
       `);

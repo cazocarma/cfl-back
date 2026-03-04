@@ -87,7 +87,7 @@ function deriveLifecycleStatus({
   requestedStatus,
   idFolio,
   idTipoFlete,
-  idCentroCostoFinal,
+  idCentroCosto,
   idDetalleViaje,
   idMovil,
   idTarifa,
@@ -99,7 +99,7 @@ function deriveLifecycleStatus({
 
   const isComplete =
     Boolean(idTipoFlete) &&
-    Boolean(idCentroCostoFinal) &&
+    Boolean(idCentroCosto) &&
     Boolean(idDetalleViaje) &&
     Boolean(idMovil) &&
     Boolean(idTarifa) &&

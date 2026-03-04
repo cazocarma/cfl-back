@@ -149,7 +149,7 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
 
         id_tipo_flete = tf.id_tipo_flete,
         tipo_flete_nombre = tf.nombre,
-        id_centro_costo_final = COALESCE(cc_sap.id_centro_costo, tf.id_centro_costo),
+        id_centro_costo = COALESCE(cc_sap.id_centro_costo, tf.id_centro_costo),
         -- Semantica: candidatos (aun no existe cabecera) => siempre DETECTADO.
         estado = 'DETECTADO',
         puede_ingresar = CAST(
@@ -238,7 +238,7 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         cantidad_entregada_total,
         id_tipo_flete,
         tipo_flete_nombre,
-        id_centro_costo_final,
+        id_centro_costo,
         estado,
         puede_ingresar,
         motivo_no_ingreso,
@@ -386,8 +386,8 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
         cf.id_tarifa,
         cf.id_cuenta_mayor,
         tf.nombre AS tipo_flete_nombre,
-        cf.id_centro_costo_final,
-        cc.nombre AS centro_costo_final_nombre,
+        cf.id_centro_costo,
+        cc.nombre AS centro_costo_nombre,
         det.total_detalles,
         cf.created_at,
         cf.updated_at,
@@ -397,9 +397,15 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
         sap_numero_entrega = NULLIF(LTRIM(RTRIM(e.sap_numero_entrega)), ''),
         e.source_system,
         sap_guia_remision = NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
+        cf.guia_remision,
+        cf.numero_entrega,
+        -- numero_guia: prioridad confirmado > snapshot SAP en cabecera > live SAP > número entrega
         numero_guia = COALESCE(
+          NULLIF(LTRIM(RTRIM(cf.guia_remision)), ''),
+          NULLIF(LTRIM(RTRIM(cf.sap_guia_remision)), ''),
           NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
-          NULLIF(LTRIM(RTRIM(cf.sap_numero_entrega_sugerido)), ''),
+          NULLIF(LTRIM(RTRIM(cf.numero_entrega)), ''),
+          NULLIF(LTRIM(RTRIM(cf.sap_numero_entrega)), ''),
           NULLIF(LTRIM(RTRIM(e.sap_numero_entrega)), '')
         ),
         sap_empresa_transporte = NULLIF(LTRIM(RTRIM(lk.sap_empresa_transporte)), ''),
@@ -423,7 +429,7 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
             THEN 'ASIGNADO_FOLIO'
           WHEN lk.created_at IS NOT NULL AND cf.updated_at IS NOT NULL AND lk.created_at > cf.updated_at THEN 'ACTUALIZADO'
           WHEN cf.id_tipo_flete IS NOT NULL
-            AND cf.id_centro_costo_final IS NOT NULL
+            AND cf.id_centro_costo IS NOT NULL
             AND cf.id_detalle_viaje IS NOT NULL
             AND cf.id_movil IS NOT NULL
             AND cf.id_tarifa IS NOT NULL
@@ -433,7 +439,7 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
       FROM [cfl].[CFL_cabecera_flete] cf
       LEFT JOIN [cfl].[CFL_folio] fol ON fol.id_folio = cf.id_folio
       LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
-      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo_final
+      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo
       LEFT JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
       LEFT JOIN [cfl].[CFL_empresa_transporte] et ON et.id_empresa = mv.id_empresa_transporte
       LEFT JOIN [cfl].[CFL_chofer] ch ON ch.id_chofer = mv.id_chofer
@@ -469,8 +475,8 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
         id_tarifa,
         id_cuenta_mayor,
         tipo_flete_nombre,
-        id_centro_costo_final,
-        centro_costo_final_nombre,
+        id_centro_costo,
+        centro_costo_nombre,
         total_detalles,
         created_at,
         updated_at,
@@ -479,6 +485,8 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
         sap_numero_entrega,
         source_system,
         sap_guia_remision,
+        guia_remision,
+        numero_entrega,
         numero_guia,
         sap_empresa_transporte,
         sap_nombre_chofer,
@@ -706,7 +714,7 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
             cf.id_cabecera_flete,
             cf.estado,
             cf.id_folio,
-            cf.id_centro_costo_final,
+            cf.id_centro_costo,
             cf.fecha_salida,
             folio_numero = f.folio_numero
           FROM [cfl].[CFL_cabecera_flete] cf
@@ -736,7 +744,7 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         continue;
       }
 
-      const idCentroCosto = Number(row.id_centro_costo_final || 0);
+      const idCentroCosto = Number(row.id_centro_costo || 0);
       if (!Number.isInteger(idCentroCosto) || idCentroCosto <= 0) {
         invalid.push({ id_cabecera_flete: idCabecera, reason: "Centro de costo invalido" });
         continue;
@@ -968,7 +976,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCostoFinal = parseRequiredBigInt(cabeceraIn.id_centro_costo_final);
+  const idCentroCosto = parseRequiredBigInt(cabeceraIn.id_centro_costo);
   const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
@@ -984,8 +992,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     res.status(400).json({ error: "Falta id_tipo_flete" });
     return;
   }
-  if (!idCentroCostoFinal) {
-    res.status(400).json({ error: "Falta id_centro_costo_final" });
+  if (!idCentroCosto) {
+    res.status(400).json({ error: "Falta id_centro_costo" });
     return;
   }
   if (!tipoMovimiento) {
@@ -1015,7 +1023,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       requestedStatus,
       idFolio: lifecycleFolioId,
       idTipoFlete,
-      idCentroCostoFinal,
+      idCentroCosto,
       idDetalleViaje,
       idMovil,
       idTarifa,
@@ -1031,7 +1039,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
           e.source_system,
           lk.sap_codigo_tipo_flete,
           lk.sap_centro_costo,
-          lk.sap_cuenta_mayor
+          lk.sap_cuenta_mayor,
+          lk.sap_guia_remision
         FROM [cfl].[CFL_sap_entrega] e
         LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
           ON lk.sap_numero_entrega = e.sap_numero_entrega
@@ -1073,11 +1082,11 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const tipoFleteCanonicoSug = toNullableTrimmedString(tipoFleteCanonicalResult.recordset[0]?.sap_codigo);
 
     const centroCostoCanonicalResult = await new sql.Request(transaction)
-      .input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal)
+      .input("idCentroCosto", sql.BigInt, idCentroCosto)
       .query(`
         SELECT TOP 1 sap_codigo
         FROM [cfl].[CFL_centro_costo]
-        WHERE id_centro_costo = @idCentroCostoFinal;
+        WHERE id_centro_costo = @idCentroCosto;
       `);
     const centroCostoCanonicoSug = toNullableTrimmedString(centroCostoCanonicalResult.recordset[0]?.sap_codigo);
 
@@ -1096,17 +1105,20 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const sapTipoFleteSug = sapTipoFlete || tipoFleteCanonicoSug;
     const sapCentroCostoSug = sapCentroCosto || centroCostoCanonicoSug;
     const sapCuentaMayorSug = sapCuentaMayor || cuentaMayorCanonicaSug;
-
-    const cuentaMayorFinalRaw = toNullableTrimmedString(cabeceraIn.cuenta_mayor_final) || sapCuentaMayorSug;
+    // cuenta_mayor_final eliminado; la cuenta contable final se gestiona via id_cuenta_mayor (FK)
+    const sapGuiaRemision = toNullableTrimmedString(entrega.sap_guia_remision);
 
     const insertCabeceraReq = new sql.Request(transaction);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
     insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), entrega.sap_numero_entrega);
-    insertCabeceraReq.input("sapCodigoTipoFleteSug", sql.Char(4), sapTipoFleteSug ? sapTipoFleteSug.slice(0, 4) : null);
-    insertCabeceraReq.input("sapCentroCostoSug", sql.Char(10), sapCentroCostoSug ? sapCentroCostoSug.slice(0, 10) : null);
-    insertCabeceraReq.input("sapCuentaMayorSug", sql.Char(10), sapCuentaMayorSug ? sapCuentaMayorSug.slice(0, 10) : null);
-    insertCabeceraReq.input("cuentaMayorFinal", sql.Char(10), cuentaMayorFinalRaw ? cuentaMayorFinalRaw.slice(0, 10) : null);
+    insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFleteSug ? sapTipoFleteSug.slice(0, 4) : null);
+    insertCabeceraReq.input("sapCentroCosto", sql.Char(10), sapCentroCostoSug ? sapCentroCostoSug.slice(0, 10) : null);
+    insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), sapCuentaMayorSug ? sapCuentaMayorSug.slice(0, 10) : null);
+    insertCabeceraReq.input("sapGuiaRemision", sql.Char(25), sapGuiaRemision ? sapGuiaRemision.slice(0, 25) : null);
+    // guia_remision y numero_entrega se rellenan cuando el operador edita el flete; null en creación
+    insertCabeceraReq.input("guiaRemision", sql.Char(25), toNullableTrimmedString(cabeceraIn.guia_remision) ? toNullableTrimmedString(cabeceraIn.guia_remision).slice(0, 25) : null);
+    insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.numero_entrega) ? toNullableTrimmedString(cabeceraIn.numero_entrega).slice(0, 20) : null);
     insertCabeceraReq.input("tipoMovimiento", sql.VarChar(4), tipoMovimiento);
     insertCabeceraReq.input("estado", sql.VarChar(20), estado);
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
@@ -1119,17 +1131,19 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     insertCabeceraReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
     insertCabeceraReq.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("updatedAt", sql.DateTime2(0), now);
-    insertCabeceraReq.input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal);
+    insertCabeceraReq.input("idCentroCosto", sql.BigInt, idCentroCosto);
 
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CFL_cabecera_flete] (
         [id_detalle_viaje],
         [id_folio],
-        [sap_numero_entrega_sugerido],
-        [sap_codigo_tipo_flete_sugerido],
-        [sap_centro_costo_sugerido],
-        [sap_cuenta_mayor_sugerida],
-        [cuenta_mayor_final],
+        [sap_numero_entrega],
+        [sap_codigo_tipo_flete],
+        [sap_centro_costo],
+        [sap_cuenta_mayor],
+        [sap_guia_remision],
+        [guia_remision],
+        [numero_entrega],
         [tipo_movimiento],
         [estado],
         [fecha_salida],
@@ -1142,17 +1156,19 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         [id_tipo_flete],
         [created_at],
         [updated_at],
-        [id_centro_costo_final]
+        [id_centro_costo]
       )
       OUTPUT INSERTED.id_cabecera_flete
       VALUES (
         @idDetalleViaje,
         @idFolio,
         @sapNumeroEntrega,
-        @sapCodigoTipoFleteSug,
-        @sapCentroCostoSug,
-        @sapCuentaMayorSug,
-        @cuentaMayorFinal,
+        @sapCodigoTipoFlete,
+        @sapCentroCosto,
+        @sapCuentaMayor,
+        @sapGuiaRemision,
+        @guiaRemision,
+        @numeroEntrega,
         @tipoMovimiento,
         @estado,
         @fechaSalida,
@@ -1165,7 +1181,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         @idTipoFlete,
         @createdAt,
         @updatedAt,
-        @idCentroCostoFinal
+        @idCentroCosto
       );
     `);
 
@@ -1283,6 +1299,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
         lk.sap_codigo_tipo_flete,
         lk.sap_centro_costo,
         lk.sap_cuenta_mayor,
+        lk.sap_guia_remision,
         CONVERT(VARCHAR(10), lk.sap_fecha_salida, 23) AS sap_fecha_salida_iso,
         CONVERT(VARCHAR(8), lk.sap_hora_salida, 108) AS sap_hora_salida_iso
       FROM [cfl].[CFL_sap_entrega] e
@@ -1343,7 +1360,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     }
 
     const sapCentroCosto = toNullableTrimmedString(delivery.sap_centro_costo);
-    let idCentroCostoFinal = null;
+    let idCentroCosto = null;
 
     if (sapCentroCosto) {
       const centroRequest = new sql.Request(transaction);
@@ -1355,17 +1372,17 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
         ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_centro_costo ASC;
       `);
 
-      idCentroCostoFinal = centroResult.recordset[0]?.id_centro_costo || null;
+      idCentroCosto = centroResult.recordset[0]?.id_centro_costo || null;
     }
 
-    if (!idCentroCostoFinal) {
-      idCentroCostoFinal = tipoFlete.id_centro_costo || null;
+    if (!idCentroCosto) {
+      idCentroCosto = tipoFlete.id_centro_costo || null;
     }
 
-    if (!idCentroCostoFinal) {
+    if (!idCentroCosto) {
       await transaction.rollback();
       res.status(422).json({
-        error: "No se pudo resolver id_centro_costo_final para la cabecera de flete",
+        error: "No se pudo resolver id_centro_costo para la cabecera de flete",
       });
       return;
     }
@@ -1375,11 +1392,13 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     const sapCuentaMayor = toNullableTrimmedString(delivery.sap_cuenta_mayor);
 
     const insertCabeceraRequest = new sql.Request(transaction);
+    // cuenta_mayor_final eliminado; la cuenta contable final se gestiona via id_cuenta_mayor (FK)
+    const sapGuiaRemisionIngresar = toNullableTrimmedString(delivery.sap_guia_remision);
     insertCabeceraRequest.input("sapNumeroEntrega", sql.VarChar(20), delivery.sap_numero_entrega);
-    insertCabeceraRequest.input("sapCodigoTipoFleteSugerido", sql.Char(4), sapTipoFlete.slice(0, 4));
-    insertCabeceraRequest.input("sapCentroCostoSugerido", sql.Char(10), sapCentroCosto ? sapCentroCosto.slice(0, 10) : null);
-    insertCabeceraRequest.input("sapCuentaMayorSugerida", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
-    insertCabeceraRequest.input("cuentaMayorFinal", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
+    insertCabeceraRequest.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFlete.slice(0, 4));
+    insertCabeceraRequest.input("sapCentroCosto", sql.Char(10), sapCentroCosto ? sapCentroCosto.slice(0, 10) : null);
+    insertCabeceraRequest.input("sapCuentaMayor", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
+    insertCabeceraRequest.input("sapGuiaRemision", sql.Char(25), sapGuiaRemisionIngresar ? sapGuiaRemisionIngresar.slice(0, 25) : null);
     insertCabeceraRequest.input("tipoMovimiento", sql.VarChar(4), "PUSH");
     insertCabeceraRequest.input("estado", sql.VarChar(20), LIFECYCLE_STATUS.EN_REVISION);
     insertCabeceraRequest.input("fechaSalida", sql.Date, fechaSalida);
@@ -1388,15 +1407,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     insertCabeceraRequest.input("idTipoFlete", sql.BigInt, tipoFlete.id_tipo_flete);
     insertCabeceraRequest.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraRequest.input("updatedAt", sql.DateTime2(0), now);
-    insertCabeceraRequest.input("idCentroCostoFinal", sql.BigInt, idCentroCostoFinal);
+    insertCabeceraRequest.input("idCentroCosto", sql.BigInt, idCentroCosto);
 
     const cabeceraResult = await insertCabeceraRequest.query(`
       INSERT INTO [cfl].[CFL_cabecera_flete] (
-        [sap_numero_entrega_sugerido],
-        [sap_codigo_tipo_flete_sugerido],
-        [sap_centro_costo_sugerido],
-        [sap_cuenta_mayor_sugerida],
-        [cuenta_mayor_final],
+        [sap_numero_entrega],
+        [sap_codigo_tipo_flete],
+        [sap_centro_costo],
+        [sap_cuenta_mayor],
+        [sap_guia_remision],
         [tipo_movimiento],
         [estado],
         [fecha_salida],
@@ -1405,15 +1424,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
         [id_tipo_flete],
         [created_at],
         [updated_at],
-        [id_centro_costo_final]
+        [id_centro_costo]
       )
       OUTPUT INSERTED.id_cabecera_flete
       VALUES (
         @sapNumeroEntrega,
-        @sapCodigoTipoFleteSugerido,
-        @sapCentroCostoSugerido,
-        @sapCuentaMayorSugerida,
-        @cuentaMayorFinal,
+        @sapCodigoTipoFlete,
+        @sapCentroCosto,
+        @sapCuentaMayor,
+        @sapGuiaRemision,
         @tipoMovimiento,
         @estado,
         @fechaSalida,
@@ -1422,7 +1441,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
         @idTipoFlete,
         @createdAt,
         @updatedAt,
-        @idCentroCostoFinal
+        @idCentroCosto
       );
     `);
 
@@ -1484,4 +1503,3 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
 module.exports = {
   dashboardRouter: router,
 };
-

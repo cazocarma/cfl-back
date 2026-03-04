@@ -406,6 +406,38 @@ const MAINTAINERS = {
       updated: "updated_at"
     },
     softDeleteColumn: "activo"
+  },
+  roles: {
+    title: "Roles",
+    table: "[cfl].[CFL_rol]",
+    alias: "t",
+    idColumn: "id_rol",
+    orderBy: "t.nombre ASC",
+    listColumns: ["t.id_rol", "t.nombre", "t.descripcion", "t.activo"],
+    create: {
+      required: ["nombre"],
+      optional: ["descripcion", "activo"]
+    },
+    update: {
+      allowed: ["nombre", "descripcion", "activo"]
+    },
+    softDeleteColumn: "activo"
+  },
+  permisos: {
+    title: "Permisos",
+    table: "[cfl].[CFL_permiso]",
+    alias: "t",
+    idColumn: "id_permiso",
+    orderBy: "t.clave ASC",
+    listColumns: ["t.id_permiso", "t.clave", "t.recurso", "t.accion", "t.descripcion", "t.activo"],
+    create: {
+      required: ["clave", "recurso", "accion"],
+      optional: ["descripcion", "activo"]
+    },
+    update: {
+      allowed: ["clave", "recurso", "accion", "descripcion", "activo"]
+    },
+    softDeleteColumn: "activo"
   }
 };
 
