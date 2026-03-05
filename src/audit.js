@@ -105,6 +105,8 @@ function deriveAction(req) {
     "crear",
     "ingresar",
     "anular",
+    "descartar",
+    "restaurar",
   ]);
 
   for (let index = segments.length - 1; index >= 0; index -= 1) {

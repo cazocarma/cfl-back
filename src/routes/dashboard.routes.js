@@ -20,6 +20,7 @@ const router = express.Router();
 function buildMissingDeliveriesQuery(filters) {
   const whereClauses = [
     "NOT EXISTS (SELECT 1 FROM [cfl].[CFL_flete_sap_entrega] fe WHERE fe.id_sap_entrega = c.id_sap_entrega)",
+    "NOT EXISTS (SELECT 1 FROM [cfl].[CFL_sap_entrega_descarte] sd WHERE sd.id_sap_entrega = c.id_sap_entrega AND sd.activo = 1)",
   ];
 
   if (filters.search) {
@@ -51,6 +52,15 @@ function buildMissingDeliveriesQuery(filters) {
   `;
 }
 
+function hasAnyRole(auth, roles = []) {
+  if (!auth || !Array.isArray(auth.roleNames)) {
+    return false;
+  }
+
+  const roleSet = new Set(auth.roleNames.map((role) => String(role || "").trim().toLowerCase()));
+  return roles.some((role) => roleSet.has(String(role || "").trim().toLowerCase()));
+}
+
 router.get("/resumen", async (req, res, next) => {
   try {
     const pool = await getPool();
@@ -65,6 +75,12 @@ router.get("/resumen", async (req, res, next) => {
             SELECT 1
             FROM [cfl].[CFL_flete_sap_entrega] fe
             WHERE fe.id_sap_entrega = e.id_sap_entrega
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM [cfl].[CFL_sap_entrega_descarte] sd
+            WHERE sd.id_sap_entrega = e.id_sap_entrega
+              AND sd.activo = 1
           )
         );
     `;
@@ -353,6 +369,7 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
   const pageSize = clamp(parsePositiveInt(req.query.page_size, 25), 1, 500);
   const offset = (page - 1) * pageSize;
   const estadoFiltro = toNullableTrimmedString(req.query.estado);
+  const searchRaw = toNullableTrimmedString(req.query.search);
 
   try {
     const pool = await getPool();
@@ -360,6 +377,7 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
     request.input("offset", offset);
     request.input("pageSize", pageSize);
     request.input("estadoFiltro", sql.VarChar(30), estadoFiltro ? estadoFiltro.toUpperCase() : null);
+    request.input("search", sql.VarChar(100), searchRaw ? `%${searchRaw}%` : null);
 
     const querySql = `
       ;WITH detalle_counts AS (
@@ -502,7 +520,19 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
         movil_tipo_camion,
         movil_patente
       FROM base
-      WHERE @estadoFiltro IS NULL OR estado_lifecycle = @estadoFiltro
+      WHERE
+        (
+          (@estadoFiltro IS NULL AND estado_lifecycle <> 'ANULADO')
+          OR estado_lifecycle = @estadoFiltro
+        )
+        AND (
+          @search IS NULL
+          OR numero_guia LIKE @search
+          OR movil_empresa LIKE @search
+          OR movil_chofer_nombre LIKE @search
+          OR movil_patente LIKE @search
+          OR tipo_flete_nombre LIKE @search
+        )
       ORDER BY updated_at DESC, id_cabecera_flete DESC
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
     `;
@@ -912,7 +942,8 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
     return;
   }
 
-  if (!hasAnyPermission(auth, ["fletes.editar", "fletes.estado.cambiar", "excepciones.gestionar", "mantenedores.admin"])) {
+  const canAnularByRole = hasAnyRole(auth, ["autorizador", "administrador"]);
+  if (!canAnularByRole && !hasAnyPermission(auth, ["fletes.anular", "mantenedores.admin"])) {
     res.status(403).json({
       error: "No tienes permisos para anular fletes",
       role: auth?.primaryRole || null,
@@ -920,9 +951,26 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
     return;
   }
 
+  const motivo = toNullableTrimmedString(req.body?.motivo);
+  if (!motivo) {
+    res.status(400).json({ error: "Debes ingresar un motivo para anular el flete" });
+    return;
+  }
+  const motivoFinal = motivo.slice(0, 200);
+  const idUsuarioActor = parseOptionalBigInt(req.jwtPayload?.id_usuario);
+  if (!idUsuarioActor) {
+    res.status(401).json({ error: "Token invalido: usuario no identificado" });
+    return;
+  }
+
+  let transaction;
+
   try {
     const pool = await getPool();
-    const current = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    const current = await new sql.Request(transaction).input("idCabecera", sql.BigInt, idCabecera).query(`
       SELECT TOP 1 id_cabecera_flete, estado
       FROM [cfl].[CFL_cabecera_flete]
       WHERE id_cabecera_flete = @idCabecera;
@@ -930,33 +978,278 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
 
     const row = current.recordset[0];
     if (!row) {
+      await transaction.rollback();
       res.status(404).json({ error: "Cabecera de flete no encontrada" });
       return;
     }
 
     const normalized = normalizeLifecycleStatus(row.estado);
     if (normalized === LIFECYCLE_STATUS.FACTURADO) {
+      await transaction.rollback();
       res.status(409).json({ error: "Un flete FACTURADO no se puede anular" });
       return;
     }
 
-    await pool
-      .request()
+    const now = new Date();
+
+    await new sql.Request(transaction)
       .input("idCabecera", sql.BigInt, idCabecera)
       .input("estado", sql.VarChar(20), LIFECYCLE_STATUS.ANULADO)
-      .input("updatedAt", sql.DateTime2(0), new Date())
+      .input("updatedAt", sql.DateTime2(0), now)
+      .input("idUsuario", sql.BigInt, idUsuarioActor)
+      .input("motivo", sql.VarChar(200), motivoFinal)
       .query(`
         UPDATE [cfl].[CFL_cabecera_flete]
         SET estado = @estado,
             updated_at = @updatedAt
         WHERE id_cabecera_flete = @idCabecera;
+
+        INSERT INTO [cfl].[CFL_flete_estado_historial] (
+          [id_cabecera_flete],
+          [estado],
+          [fecha_hora],
+          [id_usuario],
+          [motivo]
+        )
+        VALUES (
+          @idCabecera,
+          @estado,
+          @updatedAt,
+          @idUsuario,
+          @motivo
+        );
       `);
+
+    await transaction.commit();
 
     res.json({
       message: "Flete anulado",
       data: {
         id_cabecera_flete: idCabecera,
         estado: LIFECYCLE_STATUS.ANULADO,
+        motivo: motivoFinal,
+      },
+    });
+  } catch (error) {
+    if (transaction) {
+      try {
+        await transaction.rollback();
+      } catch (_rollbackError) {
+        // no-op
+      }
+    }
+    next(error);
+  }
+});
+
+router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, next) => {
+  const idSapEntrega = Number(req.params.id_sap_entrega);
+  if (!Number.isInteger(idSapEntrega) || idSapEntrega <= 0) {
+    res.status(400).json({ error: "id_sap_entrega invalido" });
+    return;
+  }
+
+  let auth = null;
+  try {
+    auth = await resolveAuthContext(req);
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  const canDescartarByRole = hasAnyRole(auth, ["autorizador", "administrador"]);
+  if (!canDescartarByRole && !hasAnyPermission(auth, ["fletes.sap.descartar", "mantenedores.admin"])) {
+    res.status(403).json({
+      error: "No tienes permisos para descartar ingresos SAP",
+      role: auth?.primaryRole || null,
+    });
+    return;
+  }
+
+  const motivo = toNullableTrimmedString(req.body?.motivo);
+  if (!motivo) {
+    res.status(400).json({ error: "Debes ingresar un motivo para descartar la entrega SAP" });
+    return;
+  }
+  const motivoFinal = motivo.slice(0, 200);
+  const idUsuarioActor = parseOptionalBigInt(req.jwtPayload?.id_usuario);
+  if (!idUsuarioActor) {
+    res.status(401).json({ error: "Token invalido: usuario no identificado" });
+    return;
+  }
+  let transaction;
+
+  try {
+    const pool = await getPool();
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    const now = new Date();
+
+    const entregaResult = await new sql.Request(transaction)
+      .input("idSapEntrega", sql.BigInt, idSapEntrega)
+      .query(`
+        SELECT TOP 1 id_sap_entrega
+        FROM [cfl].[CFL_sap_entrega]
+        WHERE id_sap_entrega = @idSapEntrega;
+      `);
+
+    if (entregaResult.recordset.length === 0) {
+      await transaction.rollback();
+      res.status(404).json({ error: "Entrega SAP no encontrada" });
+      return;
+    }
+
+    const linkedResult = await new sql.Request(transaction)
+      .input("idSapEntrega", sql.BigInt, idSapEntrega)
+      .query(`
+        SELECT TOP 1 1 AS already_linked
+        FROM [cfl].[CFL_flete_sap_entrega]
+        WHERE id_sap_entrega = @idSapEntrega;
+      `);
+
+    if (linkedResult.recordset.length > 0) {
+      await transaction.rollback();
+      res.status(409).json({
+        error: "La entrega SAP ya se encuentra asociada a una cabecera de flete y no se puede descartar",
+      });
+      return;
+    }
+
+    const currentDiscardResult = await new sql.Request(transaction)
+      .input("idSapEntrega", sql.BigInt, idSapEntrega)
+      .query(`
+        SELECT TOP 1 id_sap_entrega_descarte
+        FROM [cfl].[CFL_sap_entrega_descarte]
+        WHERE id_sap_entrega = @idSapEntrega;
+      `);
+
+    if (currentDiscardResult.recordset.length > 0) {
+      await new sql.Request(transaction)
+        .input("idSapEntrega", sql.BigInt, idSapEntrega)
+        .input("motivo", sql.VarChar(200), motivoFinal)
+        .input("updatedAt", sql.DateTime2(0), now)
+        .input("createdAt", sql.DateTime2(0), now)
+        .input("createdBy", sql.BigInt, idUsuarioActor)
+        .query(`
+          UPDATE [cfl].[CFL_sap_entrega_descarte]
+          SET activo = 1,
+              motivo = @motivo,
+              created_at = @createdAt,
+              updated_at = @updatedAt,
+              created_by = @createdBy,
+              restored_at = NULL,
+              restored_by = NULL
+          WHERE id_sap_entrega = @idSapEntrega;
+        `);
+    } else {
+      await new sql.Request(transaction)
+        .input("idSapEntrega", sql.BigInt, idSapEntrega)
+        .input("motivo", sql.VarChar(200), motivoFinal)
+        .input("createdAt", sql.DateTime2(0), now)
+        .input("updatedAt", sql.DateTime2(0), now)
+        .input("createdBy", sql.BigInt, idUsuarioActor)
+        .query(`
+          INSERT INTO [cfl].[CFL_sap_entrega_descarte] (
+            [id_sap_entrega],
+            [activo],
+            [motivo],
+            [created_at],
+            [updated_at],
+            [created_by]
+          )
+          VALUES (
+            @idSapEntrega,
+            1,
+            @motivo,
+            @createdAt,
+            @updatedAt,
+            @createdBy
+          );
+        `);
+    }
+
+    await transaction.commit();
+
+    res.json({
+      message: "Ingreso SAP descartado",
+      data: {
+        id_sap_entrega: idSapEntrega,
+        activo: true,
+        motivo: motivoFinal,
+      },
+    });
+  } catch (error) {
+    if (transaction) {
+      try {
+        await transaction.rollback();
+      } catch (_rollbackError) {
+        // no-op
+      }
+    }
+    next(error);
+  }
+});
+
+router.post("/fletes/no-ingresados/:id_sap_entrega/restaurar", async (req, res, next) => {
+  const idSapEntrega = Number(req.params.id_sap_entrega);
+  if (!Number.isInteger(idSapEntrega) || idSapEntrega <= 0) {
+    res.status(400).json({ error: "id_sap_entrega invalido" });
+    return;
+  }
+
+  let auth = null;
+  try {
+    auth = await resolveAuthContext(req);
+  } catch (error) {
+    next(error);
+    return;
+  }
+
+  const canRestaurarByRole = hasAnyRole(auth, ["autorizador", "administrador"]);
+  if (!canRestaurarByRole && !hasAnyPermission(auth, ["fletes.sap.descartar", "mantenedores.admin"])) {
+    res.status(403).json({
+      error: "No tienes permisos para restaurar ingresos SAP",
+      role: auth?.primaryRole || null,
+    });
+    return;
+  }
+
+  const idUsuarioActor = parseOptionalBigInt(req.jwtPayload?.id_usuario);
+
+  try {
+    const pool = await getPool();
+    const now = new Date();
+
+    const result = await pool
+      .request()
+      .input("idSapEntrega", sql.BigInt, idSapEntrega)
+      .input("updatedAt", sql.DateTime2(0), now)
+      .input("restoredAt", sql.DateTime2(0), now)
+      .input("restoredBy", sql.BigInt, idUsuarioActor)
+      .query(`
+        UPDATE [cfl].[CFL_sap_entrega_descarte]
+        SET activo = 0,
+            updated_at = @updatedAt,
+            restored_at = @restoredAt,
+            restored_by = @restoredBy
+        WHERE id_sap_entrega = @idSapEntrega
+          AND activo = 1;
+
+        SELECT @@ROWCOUNT AS affected;
+      `);
+
+    const affected = Number(result.recordset?.[0]?.affected || 0);
+    if (affected === 0) {
+      res.status(404).json({ error: "La entrega SAP no se encuentra descartada" });
+      return;
+    }
+
+    res.json({
+      message: "Ingreso SAP restaurado",
+      data: {
+        id_sap_entrega: idSapEntrega,
+        activo: false,
       },
     });
   } catch (error) {
@@ -1052,6 +1345,21 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     if (!entrega) {
       await transaction.rollback();
       res.status(404).json({ error: "Entrega SAP no encontrada" });
+      return;
+    }
+
+    const discardedResult = await new sql.Request(transaction)
+      .input("idSapEntrega", sql.BigInt, idSapEntrega)
+      .query(`
+        SELECT TOP 1 1 AS is_discarded
+        FROM [cfl].[CFL_sap_entrega_descarte]
+        WHERE id_sap_entrega = @idSapEntrega
+          AND activo = 1;
+      `);
+
+    if (discardedResult.recordset.length > 0) {
+      await transaction.rollback();
+      res.status(409).json({ error: "La entrega SAP se encuentra descartada y debe restaurarse antes de crearla" });
       return;
     }
 
@@ -1313,6 +1621,23 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     if (!delivery) {
       await transaction.rollback();
       res.status(404).json({ error: "Entrega SAP no encontrada" });
+      return;
+    }
+
+    const discardedResult = await new sql.Request(transaction)
+      .input("idSapEntrega", sql.BigInt, idSapEntrega)
+      .query(`
+        SELECT TOP 1 1 AS is_discarded
+        FROM [cfl].[CFL_sap_entrega_descarte]
+        WHERE id_sap_entrega = @idSapEntrega
+          AND activo = 1;
+      `);
+
+    if (discardedResult.recordset.length > 0) {
+      await transaction.rollback();
+      res.status(409).json({
+        error: "La entrega SAP se encuentra descartada y debe restaurarse antes de ingresarla",
+      });
       return;
     }
 
