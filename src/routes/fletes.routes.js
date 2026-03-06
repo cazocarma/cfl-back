@@ -230,6 +230,7 @@ router.post("/manual", async (req, res, next) => {
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete));
     insertCabeceraReq.input("sapCentroCosto", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo));
     insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_cuenta_mayor));
+    insertCabeceraReq.input("idCuentaMayor", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_cuenta_mayor));
     // sap_guia_remision no aplica en flete manual (sin origen SAP)
     insertCabeceraReq.input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null);
     insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null);
@@ -269,6 +270,7 @@ router.post("/manual", async (req, res, next) => {
         [id_tipo_flete],
         [created_at],
         [updated_at],
+        [id_cuenta_mayor],
         [id_centro_costo]
       )
       OUTPUT INSERTED.id_cabecera_flete
@@ -293,6 +295,7 @@ router.post("/manual", async (req, res, next) => {
         @idTipoFlete,
         @createdAt,
         @updatedAt,
+        @idCuentaMayor,
         @idCentroCosto
       );
     `);
@@ -470,6 +473,7 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
       .input("idTarifa", sql.BigInt, idTarifa)
       .input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones))
       .input("idTipoFlete", sql.BigInt, idTipoFlete)
+      .input("idCuentaMayor", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_cuenta_mayor))
       .input("idCentroCosto", sql.BigInt, idCentroCosto)
       .input("updatedAt", sql.DateTime2(0), now)
       .query(`
@@ -488,6 +492,7 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
           id_tarifa = @idTarifa,
           observaciones = @observaciones,
           id_tipo_flete = @idTipoFlete,
+          id_cuenta_mayor = @idCuentaMayor,
           id_centro_costo = @idCentroCosto,
           updated_at = @updatedAt
         WHERE id_cabecera_flete = @idCabecera;

@@ -2,6 +2,11 @@
 
 Backend base del proyecto de control de fletes.
 
+## Variables de entorno
+
+`cfl-back` usa el archivo centralizado `cfl-infra/.env`.
+No se usa `.env` local dentro de `cfl-back`.
+
 ## Levantar en local
 
 ```bash

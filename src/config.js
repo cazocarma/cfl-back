@@ -45,20 +45,8 @@ function loadEnvFile(filePath) {
 }
 
 function bootstrapEnv() {
-  const explicitEnvFile = process.env.CFL_ENV_FILE
-    ? path.resolve(process.cwd(), process.env.CFL_ENV_FILE)
-    : null;
-
-  const candidateFiles = [
-    explicitEnvFile,
-    path.resolve(__dirname, "..", "..", "cfl-infra", ".env"),
-    path.resolve(process.cwd(), ".env"),
-    path.resolve(__dirname, "..", ".env"),
-  ].filter(Boolean);
-
-  for (const filePath of candidateFiles) {
-    loadEnvFile(filePath);
-  }
+  const infraEnvFile = path.resolve(__dirname, "..", "..", "cfl-infra", ".env");
+  loadEnvFile(infraEnvFile);
 }
 
 function toNumber(value, fallback) {
