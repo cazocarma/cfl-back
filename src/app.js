@@ -9,6 +9,7 @@ const { authRouter } = require("./routes/auth.routes");
 const { operacionesRouter } = require("./routes/operaciones.routes");
 const { jwtMiddleware } = require("./middleware/auth.middleware");
 const { auditMiddleware } = require("./middleware/audit.middleware");
+const { normalizeJsonTextPayload } = require("./text-normalizer");
 
 const app = express();
 
@@ -18,6 +19,12 @@ app.use(
   })
 );
 app.use(express.json());
+
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (payload) => originalJson(normalizeJsonTextPayload(payload));
+  next();
+});
 
 app.get("/", (_req, res) => {
   res.json({

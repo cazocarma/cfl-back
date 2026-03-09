@@ -818,15 +818,28 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       return;
     }
 
+    // Bloquea la temporada para serializar la generacion del correlativo por temporada.
+    const temporadaLockResult = await new sql.Request(transaction)
+      .input("idTemporada", sql.BigInt, idTemporada)
+      .query(`
+        SELECT TOP 1 id_temporada
+        FROM [cfl].[CFL_temporada] WITH (UPDLOCK, HOLDLOCK)
+        WHERE id_temporada = @idTemporada;
+      `);
+
+    if (!temporadaLockResult.recordset[0]) {
+      await transaction.rollback();
+      res.status(409).json({ error: "La temporada activa ya no existe para crear folio" });
+      return;
+    }
+
     const nextNumberResult = await new sql.Request(transaction)
       .input("idTemporada", sql.BigInt, idTemporada)
-      .input("idCentroCosto", sql.BigInt, idCentroCosto)
       .query(`
         SELECT
           next_num = COALESCE(MAX(TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(folio_numero)), ''))), 0) + 1
         FROM [cfl].[CFL_folio] WITH (UPDLOCK, HOLDLOCK)
         WHERE id_temporada = @idTemporada
-          AND id_centro_costo = @idCentroCosto
           AND TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(folio_numero)), '')) IS NOT NULL;
       `);
 
