@@ -56,6 +56,10 @@ function shouldAuditRequest(req) {
     return false;
   }
 
+  if (String(req.method || "").toUpperCase() === "GET") {
+    return false;
+  }
+
   return path.startsWith("/api/");
 }
 
