@@ -13,6 +13,7 @@ const {
   deriveLifecycleStatus,
   resolveMovilId,
   resolveFolioForLifecycle,
+  resolveImputacionFlete,
 } = require("../helpers");
 
 const router = express.Router();
@@ -82,6 +83,80 @@ async function resolveProductorIdByDestinatario(transaction, explicitIdProductor
     `);
 
   return Number(result.recordset[0]?.IdProductor || 0) || null;
+}
+
+async function resolveSapImputacionContext(transaction, {
+  sapTipoFlete,
+  sapCentroCosto,
+  sapCuentaMayor,
+}) {
+  const tipoCodigo = toNullableTrimmedString(sapTipoFlete);
+  const centroCodigo = toNullableTrimmedString(sapCentroCosto);
+  const cuentaCodigo = toNullableTrimmedString(sapCuentaMayor);
+
+  if (!tipoCodigo) {
+    return {
+      idTipoFlete: null,
+      idCentroCosto: null,
+      idCuentaMayor: null,
+      idImputacionFlete: null,
+    };
+  }
+
+  const tipoResult = await new sql.Request(transaction)
+    .input("sapCodigoTipoFlete", sql.VarChar(20), tipoCodigo)
+    .query(`
+      SELECT TOP 1
+        IdTipoFlete
+      FROM [cfl].[TipoFlete]
+      WHERE SapCodigo = @sapCodigoTipoFlete
+      ORDER BY CASE WHEN Activo = 1 THEN 0 ELSE 1 END, IdTipoFlete ASC;
+    `);
+
+  const idTipoFlete = Number(tipoResult.recordset[0]?.IdTipoFlete || 0) || null;
+  if (!idTipoFlete) {
+    return {
+      idTipoFlete: null,
+      idCentroCosto: null,
+      idCuentaMayor: null,
+      idImputacionFlete: null,
+    };
+  }
+
+  let idCentroCosto = null;
+  if (centroCodigo) {
+    const centroResult = await new sql.Request(transaction)
+      .input("sapCentroCosto", sql.VarChar(20), centroCodigo)
+      .query(`
+        SELECT TOP 1
+          IdCentroCosto
+        FROM [cfl].[CentroCosto]
+        WHERE SapCodigo = @sapCentroCosto
+        ORDER BY CASE WHEN Activo = 1 THEN 0 ELSE 1 END, IdCentroCosto ASC;
+      `);
+    idCentroCosto = Number(centroResult.recordset[0]?.IdCentroCosto || 0) || null;
+  }
+
+  let idCuentaMayor = null;
+  if (cuentaCodigo) {
+    const cuentaResult = await new sql.Request(transaction)
+      .input("codigoCuentaMayor", sql.VarChar(30), cuentaCodigo)
+      .query(`
+        SELECT TOP 1
+          IdCuentaMayor
+        FROM [cfl].[CuentaMayor]
+        WHERE Codigo = @codigoCuentaMayor
+        ORDER BY IdCuentaMayor ASC;
+      `);
+    idCuentaMayor = Number(cuentaResult.recordset[0]?.IdCuentaMayor || 0) || null;
+  }
+
+  return resolveImputacionFlete(transaction, {
+    idTipoFlete,
+    idCentroCosto,
+    idCuentaMayor,
+    idImputacionFlete: null,
+  });
 }
 
 router.get("/resumen", async (req, res, next) => {
@@ -192,13 +267,35 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
 
         IdTipoFlete = tf.IdTipoFlete,
         tipo_flete_nombre = tf.Nombre,
-        IdCentroCosto = COALESCE(cc_sap.IdCentroCosto, tf.IdCentroCosto),
+        IdImputacionFlete = COALESCE(
+          im_direct.IdImputacionFlete,
+          CASE WHEN im_default.CntActivas = 1 THEN im_default.IdImputacionFlete ELSE NULL END
+        ),
+        IdCentroCosto = COALESCE(
+          cc_sap.IdCentroCosto,
+          im_direct.IdCentroCosto,
+          CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCentroCosto ELSE NULL END
+        ),
+        IdCuentaMayor = COALESCE(
+          cm_sap.IdCuentaMayor,
+          im_direct.IdCuentaMayor,
+          CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCuentaMayor ELSE NULL END
+        ),
         -- Semantica: candidatos (aun no existe cabecera) => siempre DETECTADO.
         Estado = 'DETECTADO',
         puede_ingresar = CAST(
           CASE
             WHEN tf.IdTipoFlete IS NULL THEN 0
-            WHEN COALESCE(cc_sap.IdCentroCosto, tf.IdCentroCosto) IS NULL THEN 0
+            WHEN COALESCE(
+              cc_sap.IdCentroCosto,
+              im_direct.IdCentroCosto,
+              CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCentroCosto ELSE NULL END
+            ) IS NULL THEN 0
+            WHEN COALESCE(
+              cm_sap.IdCuentaMayor,
+              im_direct.IdCuentaMayor,
+              CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCuentaMayor ELSE NULL END
+            ) IS NULL THEN 0
             WHEN lk.SapFechaSalida IS NULL THEN 0
             WHEN lk.SapHoraSalida IS NULL THEN 0
             ELSE 1
@@ -209,9 +306,22 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
             'Falta configurar Tipo de Flete para SapCodigoTipoFlete=',
             COALESCE(NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''), '(NULL)')
           )
-          WHEN COALESCE(cc_sap.IdCentroCosto, tf.IdCentroCosto) IS NULL THEN CONCAT(
+          WHEN COALESCE(
+            cc_sap.IdCentroCosto,
+            im_direct.IdCentroCosto,
+            CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCentroCosto ELSE NULL END
+          ) IS NULL THEN CONCAT(
             'No se pudo resolver Centro de Costo (SapCentroCosto=',
             COALESCE(NULLIF(LTRIM(RTRIM(lk.SapCentroCosto)), ''), '(NULL)'),
+            ')'
+          )
+          WHEN COALESCE(
+            cm_sap.IdCuentaMayor,
+            im_direct.IdCuentaMayor,
+            CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCuentaMayor ELSE NULL END
+          ) IS NULL THEN CONCAT(
+            'No se pudo resolver Cuenta Mayor (SapCuentaMayor=',
+            COALESCE(NULLIF(LTRIM(RTRIM(lk.SapCuentaMayor)), ''), '(NULL)'),
             ')'
           )
           WHEN lk.SapFechaSalida IS NULL THEN 'Falta SapFechaSalida'
@@ -233,6 +343,29 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         ON tf.SapCodigo = lk.SapCodigoTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc_sap
         ON cc_sap.SapCodigo = lk.SapCentroCosto
+      LEFT JOIN [cfl].[CuentaMayor] cm_sap
+        ON cm_sap.Codigo = lk.SapCuentaMayor
+      OUTER APPLY (
+        SELECT TOP 1
+          im.IdImputacionFlete,
+          im.IdCentroCosto,
+          im.IdCuentaMayor
+        FROM [cfl].[ImputacionFlete] im
+        WHERE im.IdTipoFlete = tf.IdTipoFlete
+          AND im.IdCentroCosto = cc_sap.IdCentroCosto
+          AND im.IdCuentaMayor = cm_sap.IdCuentaMayor
+        ORDER BY CASE WHEN im.Activo = 1 THEN 0 ELSE 1 END, im.IdImputacionFlete ASC
+      ) im_direct
+      OUTER APPLY (
+        SELECT
+          IdImputacionFlete = MIN(im.IdImputacionFlete),
+          IdCentroCosto = MIN(im.IdCentroCosto),
+          IdCuentaMayor = MIN(im.IdCuentaMayor),
+          CntActivas = COUNT_BIG(1)
+        FROM [cfl].[ImputacionFlete] im
+        WHERE im.IdTipoFlete = tf.IdTipoFlete
+          AND im.Activo = 1
+      ) im_default
       OUTER APPLY (
         SELECT TOP 1
           p.IdProductor,
@@ -271,8 +404,15 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         lk.SapPesoNeto,
         tf.IdTipoFlete,
         tf.Nombre,
-        tf.IdCentroCosto,
         cc_sap.IdCentroCosto,
+        cm_sap.IdCuentaMayor,
+        im_direct.IdImputacionFlete,
+        im_direct.IdCentroCosto,
+        im_direct.IdCuentaMayor,
+        im_default.IdImputacionFlete,
+        im_default.IdCentroCosto,
+        im_default.IdCuentaMayor,
+        im_default.CntActivas,
         e.FechaUltimaVista,
         e.FechaActualizacion;
 
@@ -304,7 +444,9 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         cantidad_entregada_total,
         IdTipoFlete,
         tipo_flete_nombre,
+        IdImputacionFlete,
         IdCentroCosto,
+        IdCuentaMayor,
         Estado,
         puede_ingresar,
         motivo_no_ingreso,
@@ -1393,7 +1535,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCosto = parseRequiredBigInt(cabeceraIn.id_centro_costo);
+  const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
   const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
@@ -1403,7 +1545,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
-  const idCuentaMayor = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
+  const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
+  const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
   const idProductor = parseOptionalBigInt(cabeceraIn.id_productor);
   const sentidoFlete = toNullableTrimmedString(cabeceraIn.sentido_flete);
 
@@ -1411,7 +1554,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     res.status(400).json({ error: "Falta id_tipo_flete" });
     return;
   }
-  if (!idCentroCosto) {
+  if (!idCentroCostoInput && !idImputacionFleteInput) {
     res.status(400).json({ error: "Falta id_centro_costo" });
     return;
   }
@@ -1436,6 +1579,21 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     await transaction.begin();
 
     const now = new Date();
+    const imputacion = await resolveImputacionFlete(transaction, {
+      idTipoFlete,
+      idCentroCosto: idCentroCostoInput,
+      idCuentaMayor: idCuentaMayorInput,
+      idImputacionFlete: idImputacionFleteInput,
+    });
+    const idCentroCosto = imputacion.idCentroCosto;
+    const idCuentaMayor = imputacion.idCuentaMayor;
+    const idImputacionFlete = imputacion.idImputacionFlete;
+    if (!idCentroCosto) {
+      await transaction.rollback();
+      res.status(422).json({ error: "No se pudo resolver id_centro_costo para la cabecera de flete" });
+      return;
+    }
+
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
     const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
     const estado = deriveLifecycleStatus({
@@ -1514,7 +1672,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         FROM [cfl].[TipoFlete]
         WHERE IdTipoFlete = @idTipoFlete;
       `);
-    const tipoFleteCanonicoSug = toNullableTrimmedString(tipoFleteCanonicalResult.recordset[0]?.sap_codigo);
+    const tipoFleteCanonicoSug = toNullableTrimmedString(tipoFleteCanonicalResult.recordset[0]?.SapCodigo);
 
     const centroCostoCanonicalResult = await new sql.Request(transaction)
       .input("idCentroCosto", sql.BigInt, idCentroCosto)
@@ -1523,7 +1681,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         FROM [cfl].[CentroCosto]
         WHERE IdCentroCosto = @idCentroCosto;
       `);
-    const centroCostoCanonicoSug = toNullableTrimmedString(centroCostoCanonicalResult.recordset[0]?.sap_codigo);
+    const centroCostoCanonicoSug = toNullableTrimmedString(centroCostoCanonicalResult.recordset[0]?.SapCodigo);
 
     let cuentaMayorCanonicaSug = null;
     if (idCuentaMayor) {
@@ -1534,7 +1692,10 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
           FROM [cfl].[CuentaMayor]
           WHERE IdCuentaMayor = @idCuentaMayor;
         `);
-      cuentaMayorCanonicaSug = toNullableTrimmedString(cuentaMayorCanonicalResult.recordset[0]?.codigo);
+      cuentaMayorCanonicaSug = toNullableTrimmedString(
+        cuentaMayorCanonicalResult.recordset[0]?.codigo
+        || cuentaMayorCanonicalResult.recordset[0]?.Codigo
+      );
     }
 
     const sapTipoFleteSug = sapTipoFlete || tipoFleteCanonicoSug;
@@ -1555,6 +1716,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFleteSug ? sapTipoFleteSug.slice(0, 4) : null);
     insertCabeceraReq.input("sapCentroCosto", sql.Char(10), sapCentroCostoSug ? sapCentroCostoSug.slice(0, 10) : null);
     insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), sapCuentaMayorSug ? sapCuentaMayorSug.slice(0, 10) : null);
+    insertCabeceraReq.input("idCuentaMayor", sql.BigInt, idCuentaMayor);
+    insertCabeceraReq.input("idImputacionFlete", sql.BigInt, idImputacionFlete);
     insertCabeceraReq.input("sapGuiaRemision", sql.Char(25), sapGuiaRemision ? sapGuiaRemision.slice(0, 25) : null);
     // guia_remision y numero_entrega se rellenan cuando el operador edita el flete; null en creación
     const guiaRemisionIn = toNullableTrimmedString(cabeceraIn.guia_remision);
@@ -1602,6 +1765,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         [IdTipoFlete],
         [FechaCreacion],
         [FechaActualizacion],
+        [IdCuentaMayor],
+        [IdImputacionFlete],
         [IdCentroCosto]
       )
       OUTPUT INSERTED.IdCabeceraFlete
@@ -1629,6 +1794,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         @idTipoFlete,
         @createdAt,
         @updatedAt,
+        @idCuentaMayor,
+        @idImputacionFlete,
         @idCentroCosto
       );
     `);
@@ -1807,17 +1974,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
       return;
     }
 
-    const tipoFleteRequest = new sql.Request(transaction);
-    tipoFleteRequest.input("sapCodigo", sql.VarChar(20), sapTipoFlete);
-    const tipoFleteResult = await tipoFleteRequest.query(`
-      SELECT TOP 1 IdTipoFlete, IdCentroCosto
-      FROM [cfl].[TipoFlete]
-      WHERE SapCodigo = @sapCodigo
-      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, IdTipoFlete ASC;
-    `);
+    const sapCentroCosto = toNullableTrimmedString(delivery.sap_centro_costo);
+    const sapCuentaMayor = toNullableTrimmedString(delivery.sap_cuenta_mayor);
+    const imputacion = await resolveSapImputacionContext(transaction, {
+      sapTipoFlete,
+      sapCentroCosto,
+      sapCuentaMayor,
+    });
 
-    const tipoFlete = tipoFleteResult.recordset[0];
-    if (!tipoFlete) {
+    if (!imputacion.idTipoFlete) {
       await transaction.rollback();
       res.status(422).json({
         error: `No existe un tipo de flete configurado para sap_codigo_tipo_flete=${sapTipoFlete}`,
@@ -1825,25 +1990,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
       return;
     }
 
-    const sapCentroCosto = toNullableTrimmedString(delivery.sap_centro_costo);
-    let idCentroCosto = null;
-
-    if (sapCentroCosto) {
-      const centroRequest = new sql.Request(transaction);
-      centroRequest.input("sapCentroCosto", sql.VarChar(20), sapCentroCosto);
-      const centroResult = await centroRequest.query(`
-        SELECT TOP 1 IdCentroCosto
-        FROM [cfl].[CentroCosto]
-        WHERE SapCodigo = @sapCentroCosto
-        ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, IdCentroCosto ASC;
-      `);
-
-      idCentroCosto = centroResult.recordset[0]?.id_centro_costo || null;
-    }
-
-    if (!idCentroCosto) {
-      idCentroCosto = tipoFlete.id_centro_costo || null;
-    }
+    const idCentroCosto = imputacion.idCentroCosto || null;
+    const idCuentaMayor = imputacion.idCuentaMayor || null;
+    const idImputacionFlete = imputacion.idImputacionFlete || null;
 
     if (!idCentroCosto) {
       await transaction.rollback();
@@ -1855,7 +2004,6 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
 
     const fechaSalida = delivery.sap_fecha_salida_iso || now.toISOString().slice(0, 10);
     const horaSalida = delivery.sap_hora_salida_iso || now.toISOString().slice(11, 19);
-    const sapCuentaMayor = toNullableTrimmedString(delivery.sap_cuenta_mayor);
 
     const insertCabeceraRequest = new sql.Request(transaction);
     // cuenta_mayor_final eliminado; la cuenta contable final se gestiona via id_cuenta_mayor (FK)
@@ -1877,7 +2025,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     insertCabeceraRequest.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraRequest.input("horaSalida", sql.VarChar(8), horaSalida);
     insertCabeceraRequest.input("montoAplicado", sql.Decimal(18, 2), 0);
-    insertCabeceraRequest.input("idTipoFlete", sql.BigInt, tipoFlete.id_tipo_flete);
+    insertCabeceraRequest.input("idTipoFlete", sql.BigInt, imputacion.idTipoFlete);
+    insertCabeceraRequest.input("idCuentaMayor", sql.BigInt, idCuentaMayor);
+    insertCabeceraRequest.input("idImputacionFlete", sql.BigInt, idImputacionFlete);
     insertCabeceraRequest.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraRequest.input("updatedAt", sql.DateTime2(0), now);
     insertCabeceraRequest.input("idCentroCosto", sql.BigInt, idCentroCosto);
@@ -1897,6 +2047,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
         [HoraSalida],
         [MontoAplicado],
         [IdTipoFlete],
+        [IdCuentaMayor],
+        [IdImputacionFlete],
         [FechaCreacion],
         [FechaActualizacion],
         [IdCentroCosto]
@@ -1916,13 +2068,19 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
         CAST(@horaSalida AS TIME),
         @montoAplicado,
         @idTipoFlete,
+        @idCuentaMayor,
+        @idImputacionFlete,
         @createdAt,
         @updatedAt,
         @idCentroCosto
       );
     `);
 
-    const idCabeceraFlete = cabeceraResult.recordset[0].id_cabecera_flete;
+    const idCabeceraFlete = Number(
+      cabeceraResult.recordset[0]?.IdCabeceraFlete
+      || cabeceraResult.recordset[0]?.id_cabecera_flete
+      || 0
+    );
 
     const insertBridgeRequest = new sql.Request(transaction);
     insertBridgeRequest.input("idCabeceraFlete", sql.BigInt, idCabeceraFlete);
@@ -1953,7 +2111,11 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
       );
     `);
 
-    const idFleteSapEntrega = bridgeResult.recordset[0].id_flete_sap_entrega;
+    const idFleteSapEntrega = Number(
+      bridgeResult.recordset[0]?.IdFleteSapEntrega
+      || bridgeResult.recordset[0]?.id_flete_sap_entrega
+      || 0
+    );
 
     await transaction.commit();
 

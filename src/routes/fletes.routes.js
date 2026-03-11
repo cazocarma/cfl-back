@@ -10,6 +10,7 @@ const {
   deriveLifecycleStatus,
   resolveMovilId,
   resolveFolioForLifecycle,
+  resolveImputacionFlete,
 } = require("../helpers");
 
 const router = express.Router();
@@ -202,7 +203,9 @@ router.post("/manual", async (req, res, next) => {
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCosto = parseRequiredBigInt(cabeceraIn.id_centro_costo);
+  const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
+  const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
+  const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
   const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
@@ -221,7 +224,7 @@ router.post("/manual", async (req, res, next) => {
     res.status(400).json({ error: "Falta id_tipo_flete" });
     return;
   }
-  if (!idCentroCosto) {
+  if (!idCentroCostoInput && !idImputacionFleteInput) {
     res.status(400).json({ error: "Falta id_centro_costo" });
     return;
   }
@@ -246,6 +249,22 @@ router.post("/manual", async (req, res, next) => {
     await transaction.begin();
 
     const now = new Date();
+    const imputacion = await resolveImputacionFlete(transaction, {
+      idTipoFlete,
+      idCentroCosto: idCentroCostoInput,
+      idCuentaMayor: idCuentaMayorInput,
+      idImputacionFlete: idImputacionFleteInput,
+    });
+    const idCentroCosto = imputacion.idCentroCosto;
+    const idCuentaMayor = imputacion.idCuentaMayor;
+    const idImputacionFlete = imputacion.idImputacionFlete;
+
+    if (!idCentroCosto) {
+      await transaction.rollback();
+      res.status(422).json({ error: "No se pudo resolver id_centro_costo para la cabecera de flete" });
+      return;
+    }
+
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
     const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
     const estado = deriveLifecycleStatus({
@@ -266,7 +285,8 @@ router.post("/manual", async (req, res, next) => {
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete));
     insertCabeceraReq.input("sapCentroCosto", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo));
     insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_cuenta_mayor));
-    insertCabeceraReq.input("idCuentaMayor", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_cuenta_mayor));
+    insertCabeceraReq.input("idCuentaMayor", sql.BigInt, idCuentaMayor);
+    insertCabeceraReq.input("idImputacionFlete", sql.BigInt, idImputacionFlete);
     insertCabeceraReq.input("idProductor", sql.BigInt, idProductor);
     insertCabeceraReq.input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null);
     insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null);
@@ -310,6 +330,7 @@ router.post("/manual", async (req, res, next) => {
         [FechaCreacion],
         [FechaActualizacion],
         [IdCuentaMayor],
+        [IdImputacionFlete],
         [IdCentroCosto]
       )
       OUTPUT INSERTED.IdCabeceraFlete
@@ -337,6 +358,7 @@ router.post("/manual", async (req, res, next) => {
         @createdAt,
         @updatedAt,
         @idCuentaMayor,
+        @idImputacionFlete,
         @idCentroCosto
       );
     `);
@@ -416,7 +438,9 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCosto = parseRequiredBigInt(cabeceraIn.id_centro_costo);
+  const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
+  const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
+  const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
   const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
@@ -435,7 +459,7 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
     res.status(400).json({ error: "Falta id_tipo_flete" });
     return;
   }
-  if (!idCentroCosto) {
+  if (!idCentroCostoInput && !idImputacionFleteInput) {
     res.status(400).json({ error: "Falta id_centro_costo" });
     return;
   }
@@ -485,6 +509,22 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
     const idProductor = idProductorIn ?? existing.IdProductor ?? null;
     const idFolio = idFolioIn ?? existing.IdFolio ?? null;
     const idTarifa = idTarifaIn ?? existing.IdTarifa ?? null;
+    const imputacion = await resolveImputacionFlete(transaction, {
+      idTipoFlete,
+      idCentroCosto: idCentroCostoInput ?? existing.IdCentroCosto ?? null,
+      idCuentaMayor: idCuentaMayorInput ?? existing.IdCuentaMayor ?? null,
+      idImputacionFlete: idImputacionFleteInput ?? existing.IdImputacionFlete ?? null,
+    });
+    const idCentroCosto = imputacion.idCentroCosto;
+    const idCuentaMayor = imputacion.idCuentaMayor;
+    const idImputacionFlete = imputacion.idImputacionFlete;
+
+    if (!idCentroCosto) {
+      await transaction.rollback();
+      res.status(422).json({ error: "No se pudo resolver id_centro_costo para la cabecera de flete" });
+      return;
+    }
+
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now, existing.IdMovil ?? null);
     const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
     const guiaRemision  = guiaRemisionIn  ?? (existing.GuiaRemision  ? String(existing.GuiaRemision)  : null);
@@ -516,7 +556,8 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
       .input("idTarifa", sql.BigInt, idTarifa)
       .input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones))
       .input("idTipoFlete", sql.BigInt, idTipoFlete)
-      .input("idCuentaMayor", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_cuenta_mayor))
+      .input("idCuentaMayor", sql.BigInt, idCuentaMayor)
+      .input("idImputacionFlete", sql.BigInt, idImputacionFlete)
       .input("idProductor", sql.BigInt, idProductor)
       .input("sentidoFlete", sql.VarChar(20), sentidoFlete ? sentidoFlete.slice(0, 20) : null)
       .input("idCentroCosto", sql.BigInt, idCentroCosto)
@@ -538,6 +579,7 @@ router.put("/:id_cabecera_flete", async (req, res, next) => {
           Observaciones = @observaciones,
           IdTipoFlete = @idTipoFlete,
           IdCuentaMayor = @idCuentaMayor,
+          IdImputacionFlete = @idImputacionFlete,
           IdProductor = @idProductor,
           SentidoFlete = @sentidoFlete,
           IdCentroCosto = @idCentroCosto,

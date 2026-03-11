@@ -63,23 +63,54 @@ const MAINTAINERS = {
     table: "[cfl].[TipoFlete]",
     alias: "t",
     idColumn: "IdTipoFlete",
-    from: "[cfl].[TipoFlete] t INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto",
     orderBy: "t.Nombre ASC",
     listColumns: [
       "t.IdTipoFlete",
       "t.SapCodigo",
       "t.Nombre",
-      "t.Activo",
-      "t.IdCentroCosto",
-      "cc.SapCodigo AS CentroCostoSapCodigo",
-      "cc.Nombre AS CentroCostoNombre"
+      "t.Activo"
     ],
     create: {
-      required: ["SapCodigo", "Nombre", "IdCentroCosto"],
+      required: ["SapCodigo", "Nombre"],
       optional: ["Activo"]
     },
     update: {
-      allowed: ["SapCodigo", "Nombre", "IdCentroCosto", "Activo"]
+      allowed: ["SapCodigo", "Nombre", "Activo"]
+    },
+    softDeleteColumn: "Activo"
+  },
+  "imputaciones-flete": {
+    title: "Imputaciones de Flete",
+    table: "[cfl].[ImputacionFlete]",
+    alias: "t",
+    idColumn: "IdImputacionFlete",
+    from: "[cfl].[ImputacionFlete] t INNER JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = t.IdTipoFlete INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto INNER JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = t.IdCuentaMayor",
+    orderBy: "tf.Nombre ASC, cc.SapCodigo ASC, cm.Codigo ASC",
+    listColumns: [
+      "t.IdImputacionFlete",
+      "t.IdTipoFlete",
+      "tf.SapCodigo AS TipoFleteSapCodigo",
+      "tf.Nombre AS TipoFleteNombre",
+      "t.IdCentroCosto",
+      "cc.SapCodigo AS CentroCostoSapCodigo",
+      "cc.Nombre AS CentroCostoNombre",
+      "t.IdCuentaMayor",
+      "cm.Codigo AS CuentaMayorCodigo",
+      "cm.Glosa AS CuentaMayorGlosa",
+      "t.Activo",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
+    ],
+    create: {
+      required: ["IdTipoFlete", "IdCentroCosto", "IdCuentaMayor"],
+      optional: ["Activo"]
+    },
+    update: {
+      allowed: ["IdTipoFlete", "IdCentroCosto", "IdCuentaMayor", "Activo"]
+    },
+    timestamps: {
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
     softDeleteColumn: "Activo"
   },
@@ -410,13 +441,16 @@ const MAINTAINERS = {
     table: "[cfl].[Folio]",
     alias: "t",
     idColumn: "IdFolio",
-    from: "[cfl].[Folio] t INNER JOIN [cfl].[Temporada] tp ON tp.IdTemporada = t.IdTemporada INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto",
+    from: "[cfl].[Folio] t INNER JOIN [cfl].[Temporada] tp ON tp.IdTemporada = t.IdTemporada INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = t.IdCuentaMayor",
     orderBy: "t.FechaCreacion DESC",
     listColumns: [
       "t.IdFolio",
       "t.IdCentroCosto",
       "cc.SapCodigo AS CentroCostoSapCodigo",
       "cc.Nombre AS CentroCostoNombre",
+      "t.IdCuentaMayor",
+      "cm.Codigo AS CuentaMayorCodigo",
+      "cm.Glosa AS CuentaMayorGlosa",
       "t.IdTemporada",
       "tp.Codigo AS TemporadaCodigo",
       "t.FolioNumero",
@@ -431,12 +465,13 @@ const MAINTAINERS = {
       "t.FechaActualizacion"
     ],
     create: {
-      required: ["IdCentroCosto", "IdTemporada", "FolioNumero", "Estado"],
+      required: ["IdCentroCosto", "IdTemporada", "IdCuentaMayor", "FolioNumero", "Estado"],
       optional: ["PeriodoDesde", "PeriodoHasta", "Bloqueado", "FechaCierre", "ResultadoCuadratura", "ResumenCuadratura"]
     },
     update: {
       allowed: [
         "IdCentroCosto",
+        "IdCuentaMayor",
         "IdTemporada",
         "FolioNumero",
         "PeriodoDesde",

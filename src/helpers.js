@@ -195,6 +195,171 @@ async function resolveFolioForLifecycle(transaction, idFolio) {
   return numero === "0" ? null : parsed;
 }
 
+function buildDomainError(message, statusCode = 422) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+/**
+ * Resuelve la imputacion contable para una cabecera.
+ * Estrategia incremental:
+ * - Si viene IdImputacionFlete, valida consistencia y prioriza esa regla.
+ * - Si viene trio (tipo+centro+cuenta), intenta mapear a una imputacion activa.
+ * - Si falta centro/cuenta, intenta autocompletar cuando exista una unica opcion activa.
+ * - Si no hay match, mantiene snapshot (centro/cuenta) y retorna IdImputacionFlete = null.
+ */
+async function resolveImputacionFlete(transaction, {
+  idTipoFlete,
+  idCentroCosto = null,
+  idCuentaMayor = null,
+  idImputacionFlete = null,
+}) {
+  const tipo = parseOptionalBigInt(idTipoFlete);
+  const centro = parseOptionalBigInt(idCentroCosto);
+  const cuenta = parseOptionalBigInt(idCuentaMayor);
+  const imputacion = parseOptionalBigInt(idImputacionFlete);
+
+  if (!tipo) {
+    return {
+      idTipoFlete: null,
+      idCentroCosto: centro,
+      idCuentaMayor: cuenta,
+      idImputacionFlete: imputacion,
+    };
+  }
+
+  if (imputacion) {
+    const byId = await new sql.Request(transaction)
+      .input("idImputacionFlete", sql.BigInt, imputacion)
+      .query(`
+        SELECT TOP 1
+          IdImputacionFlete,
+          IdTipoFlete,
+          IdCentroCosto,
+          IdCuentaMayor
+        FROM [cfl].[ImputacionFlete]
+        WHERE IdImputacionFlete = @idImputacionFlete;
+      `);
+
+    const row = byId.recordset[0] || null;
+    if (!row) {
+      throw buildDomainError("La imputacion seleccionada no existe", 422);
+    }
+
+    if (tipo && Number(row.IdTipoFlete) !== tipo) {
+      throw buildDomainError("La imputacion no corresponde al tipo de flete seleccionado", 422);
+    }
+    if (centro && Number(row.IdCentroCosto) !== centro) {
+      throw buildDomainError("La imputacion no corresponde al centro de costo seleccionado", 422);
+    }
+    if (cuenta && Number(row.IdCuentaMayor) !== cuenta) {
+      throw buildDomainError("La imputacion no corresponde a la cuenta mayor seleccionada", 422);
+    }
+
+    return {
+      idTipoFlete: Number(row.IdTipoFlete),
+      idCentroCosto: Number(row.IdCentroCosto),
+      idCuentaMayor: Number(row.IdCuentaMayor),
+      idImputacionFlete: Number(row.IdImputacionFlete),
+    };
+  }
+
+  if (centro && cuenta) {
+    const byCombo = await new sql.Request(transaction)
+      .input("idTipoFlete", sql.BigInt, tipo)
+      .input("idCentroCosto", sql.BigInt, centro)
+      .input("idCuentaMayor", sql.BigInt, cuenta)
+      .query(`
+        SELECT TOP 1
+          IdImputacionFlete,
+          IdTipoFlete,
+          IdCentroCosto,
+          IdCuentaMayor
+        FROM [cfl].[ImputacionFlete]
+        WHERE IdTipoFlete = @idTipoFlete
+          AND IdCentroCosto = @idCentroCosto
+          AND IdCuentaMayor = @idCuentaMayor
+        ORDER BY CASE WHEN Activo = 1 THEN 0 ELSE 1 END, IdImputacionFlete ASC;
+      `);
+
+    const row = byCombo.recordset[0] || null;
+    if (row) {
+      return {
+        idTipoFlete: Number(row.IdTipoFlete),
+        idCentroCosto: Number(row.IdCentroCosto),
+        idCuentaMayor: Number(row.IdCuentaMayor),
+        idImputacionFlete: Number(row.IdImputacionFlete),
+      };
+    }
+
+    return {
+      idTipoFlete: tipo,
+      idCentroCosto: centro,
+      idCuentaMayor: cuenta,
+      idImputacionFlete: null,
+    };
+  }
+
+  const byType = await new sql.Request(transaction)
+    .input("idTipoFlete", sql.BigInt, tipo)
+    .query(`
+      SELECT
+        IdImputacionFlete,
+        IdTipoFlete,
+        IdCentroCosto,
+        IdCuentaMayor
+      FROM [cfl].[ImputacionFlete]
+      WHERE IdTipoFlete = @idTipoFlete
+        AND Activo = 1
+      ORDER BY IdImputacionFlete ASC;
+    `);
+
+  const rows = byType.recordset || [];
+  if (rows.length === 1) {
+    const row = rows[0];
+    return {
+      idTipoFlete: Number(row.IdTipoFlete),
+      idCentroCosto: Number(row.IdCentroCosto),
+      idCuentaMayor: Number(row.IdCuentaMayor),
+      idImputacionFlete: Number(row.IdImputacionFlete),
+    };
+  }
+
+  if (centro) {
+    const byTypeCentro = rows.filter((row) => Number(row.IdCentroCosto) === centro);
+    if (byTypeCentro.length === 1) {
+      const row = byTypeCentro[0];
+      return {
+        idTipoFlete: Number(row.IdTipoFlete),
+        idCentroCosto: Number(row.IdCentroCosto),
+        idCuentaMayor: Number(row.IdCuentaMayor),
+        idImputacionFlete: Number(row.IdImputacionFlete),
+      };
+    }
+  }
+
+  if (cuenta) {
+    const byTypeCuenta = rows.filter((row) => Number(row.IdCuentaMayor) === cuenta);
+    if (byTypeCuenta.length === 1) {
+      const row = byTypeCuenta[0];
+      return {
+        idTipoFlete: Number(row.IdTipoFlete),
+        idCentroCosto: Number(row.IdCentroCosto),
+        idCuentaMayor: Number(row.IdCuentaMayor),
+        idImputacionFlete: Number(row.IdImputacionFlete),
+      };
+    }
+  }
+
+  return {
+    idTipoFlete: tipo,
+    idCentroCosto: centro,
+    idCuentaMayor: cuenta,
+    idImputacionFlete: null,
+  };
+}
+
 module.exports = {
   // Parsing
   toNullableTrimmedString,
@@ -210,4 +375,5 @@ module.exports = {
   // BD
   resolveMovilId,
   resolveFolioForLifecycle,
+  resolveImputacionFlete,
 };

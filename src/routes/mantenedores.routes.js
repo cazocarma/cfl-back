@@ -142,11 +142,14 @@ async function fetchTiposFleteRows(pool) {
       t.SapCodigo,
       t.Nombre,
       t.Activo,
-      t.IdCentroCosto,
-      cc.SapCodigo AS CentroCostoSapCodigo,
-      cc.Nombre AS CentroCostoNombre
+      CantidadImputacionesActivas = COALESCE(im.CantidadImputacionesActivas, 0)
     FROM [cfl].[TipoFlete] t
-    INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto
+    OUTER APPLY (
+      SELECT COUNT_BIG(1) AS CantidadImputacionesActivas
+      FROM [cfl].[ImputacionFlete] i
+      WHERE i.IdTipoFlete = t.IdTipoFlete
+        AND i.Activo = 1
+    ) im
     ORDER BY t.Nombre ASC;
   `;
 
@@ -166,11 +169,8 @@ async function fetchTiposFleteRows(pool) {
       t.sap_codigo AS SapCodigo,
       t.nombre AS Nombre,
       t.activo AS Activo,
-      t.id_centro_costo AS IdCentroCosto,
-      cc.sap_codigo AS CentroCostoSapCodigo,
-      cc.nombre AS CentroCostoNombre
+      CAST(NULL AS BIGINT) AS CantidadImputacionesActivas
     FROM [cfl].[CFL_tipo_flete] t
-    INNER JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = t.id_centro_costo
     ORDER BY t.nombre ASC;
   `;
 
