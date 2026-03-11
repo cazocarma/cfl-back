@@ -45,31 +45,31 @@ async function computePreview(pool, idEmpresa, idsFolio, criterio) {
 
   const folioData = await folReq.query(`
     SELECT
-      f.id_folio,
-      f.folio_numero,
-      f.id_centro_costo,
+      f.IdFolio,
+      f.FolioNumero,
+      f.IdCentroCosto,
       cc.nombre  AS centro_costo,
-      cc.sap_codigo AS centro_costo_codigo,
+      cc.SapCodigo AS centro_costo_codigo,
       primary_tipo_flete_id = (
-        SELECT TOP 1 cf2.id_tipo_flete
-        FROM [cfl].[CFL_cabecera_flete] cf2
-        WHERE cf2.id_folio = f.id_folio
+        SELECT TOP 1 cf2.IdTipoFlete
+        FROM [cfl].[CabeceraFlete] cf2
+        WHERE cf2.IdFolio = f.IdFolio
           AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
-        GROUP BY cf2.id_tipo_flete
+        GROUP BY cf2.IdTipoFlete
         ORDER BY COUNT(*) DESC
       ),
       primary_tipo_flete_nombre = (
         SELECT TOP 1 tf2.nombre
-        FROM [cfl].[CFL_cabecera_flete] cf2
-        INNER JOIN [cfl].[CFL_tipo_flete] tf2 ON tf2.id_tipo_flete = cf2.id_tipo_flete
-        WHERE cf2.id_folio = f.id_folio
+        FROM [cfl].[CabeceraFlete] cf2
+        INNER JOIN [cfl].[TipoFlete] tf2 ON tf2.IdTipoFlete = cf2.IdTipoFlete
+        WHERE cf2.IdFolio = f.IdFolio
           AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
-        GROUP BY cf2.id_tipo_flete, tf2.nombre
+        GROUP BY cf2.IdTipoFlete, tf2.nombre
         ORDER BY COUNT(*) DESC
       )
-    FROM [cfl].[CFL_folio] f
-    LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = f.id_centro_costo
-    WHERE f.id_folio IN (${inClause});
+    FROM [cfl].[Folio] f
+    LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = f.IdCentroCosto
+    WHERE f.IdFolio IN (${inClause});
   `);
 
   // Movimientos elegibles de esos folios
@@ -78,38 +78,38 @@ async function computePreview(pool, idEmpresa, idsFolio, criterio) {
 
   const movData = await movReq.query(`
     SELECT
-      cf.id_cabecera_flete,
-      cf.id_folio,
-      cf.sap_numero_entrega,
-      cf.numero_entrega,
-      cf.guia_remision,
-      cf.tipo_movimiento,
-      cf.fecha_salida,
-      cf.monto_aplicado,
-      cf.id_tipo_flete,
+      cf.IdCabeceraFlete,
+      cf.IdFolio,
+      cf.SapNumeroEntrega,
+      cf.NumeroEntrega,
+      cf.GuiaRemision,
+      cf.TipoMovimiento,
+      cf.FechaSalida,
+      cf.MontoAplicado,
+      cf.IdTipoFlete,
       tf.nombre  AS tipo_flete_nombre,
-      tf.sap_codigo AS tipo_flete_codigo,
-      cf.id_centro_costo,
+      tf.SapCodigo AS tipo_flete_codigo,
+      cf.IdCentroCosto,
       cc.nombre  AS centro_costo,
-      cc.sap_codigo AS centro_costo_codigo,
-      ruta = COALESCE(r.nombre_ruta,
+      cc.SapCodigo AS centro_costo_codigo,
+      ruta = COALESCE(r.NombreRuta,
         CASE WHEN no.nombre IS NOT NULL OR nd.nombre IS NOT NULL
           THEN CONCAT(COALESCE(no.nombre,'Origen'), ' -> ', COALESCE(nd.nombre,'Destino'))
           ELSE NULL END
       ),
-      empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), NULL)
-    FROM [cfl].[CFL_cabecera_flete] cf
-    LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
-    LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo
-    LEFT JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
-    LEFT JOIN [cfl].[CFL_empresa_transporte] emp ON emp.id_empresa = mv.id_empresa_transporte
-    LEFT JOIN [cfl].[CFL_tarifa] tar ON tar.id_tarifa = cf.id_tarifa
-    LEFT JOIN [cfl].[CFL_ruta] r ON r.id_ruta = tar.id_ruta
-    LEFT JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = r.id_origen_nodo
-    LEFT JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = r.id_destino_nodo
-    WHERE cf.id_folio IN (${inClause})
+      empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL)
+    FROM [cfl].[CabeceraFlete] cf
+    LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
+    LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+    LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+    LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
+    LEFT JOIN [cfl].[Tarifa] tar ON tar.IdTarifa = cf.IdTarifa
+    LEFT JOIN [cfl].[Ruta] r ON r.IdRuta = tar.IdRuta
+    LEFT JOIN [cfl].[NodoLogistico] no ON no.IdNodo = r.IdOrigenNodo
+    LEFT JOIN [cfl].[NodoLogistico] nd ON nd.IdNodo = r.IdDestinoNodo
+    WHERE cf.IdFolio IN (${inClause})
       AND UPPER(cf.estado) = 'ASIGNADO_FOLIO'
-    ORDER BY cf.fecha_salida, cf.id_cabecera_flete;
+    ORDER BY cf.FechaSalida, cf.IdCabeceraFlete;
   `);
 
   const folioMap = new Map(folioData.recordset.map(f => [Number(f.id_folio), f]));
@@ -170,24 +170,24 @@ async function fetchFactura(pool, idFactura) {
     .input('idFactura', sql.BigInt, idFactura)
     .query(`
       SELECT
-        fac.id_factura,
-        fac.id_empresa,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), CONCAT('Empresa #', fac.id_empresa)),
+        fac.IdFactura,
+        fac.IdEmpresa,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
         emp.rut AS empresa_rut,
-        fac.numero_factura,
-        fac.fecha_emision,
+        fac.NumeroFactura,
+        fac.FechaEmision,
         fac.moneda,
-        fac.monto_neto,
-        fac.monto_iva,
-        fac.monto_total,
+        fac.MontoNeto,
+        fac.MontoIva,
+        fac.MontoTotal,
         fac.estado,
-        fac.criterio_agrupacion,
-        fac.observaciones,
-        fac.created_at,
-        fac.updated_at
-      FROM [cfl].[CFL_cabecera_factura] fac
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp ON emp.id_empresa = fac.id_empresa
-      WHERE fac.id_factura = @idFactura;
+        fac.CriterioAgrupacion,
+        fac.Observaciones,
+        fac.FechaCreacion,
+        fac.FechaActualizacion
+      FROM [cfl].[CabeceraFactura] fac
+      LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = fac.IdEmpresa
+      WHERE fac.IdFactura = @idFactura;
     `);
 
   if (!facResult.recordset[0]) return null;
@@ -198,27 +198,27 @@ async function fetchFactura(pool, idFactura) {
     .input('idFactura', sql.BigInt, idFactura)
     .query(`
       SELECT
-        ff.id_factura_folio,
-        ff.id_folio,
-        fol.folio_numero,
+        ff.IdFacturaFolio,
+        ff.IdFolio,
+        fol.FolioNumero,
         fol.estado AS estado_folio,
-        fol.id_centro_costo,
+        fol.IdCentroCosto,
         cc.nombre  AS centro_costo,
-        cc.sap_codigo AS centro_costo_codigo,
-        fol.periodo_desde,
-        fol.periodo_hasta,
-        total_movimientos       = COUNT_BIG(cf.id_cabecera_flete),
-        monto_total_movimientos = COALESCE(SUM(cf.monto_aplicado), 0)
-      FROM [cfl].[CFL_factura_folio] ff
-      INNER JOIN [cfl].[CFL_folio] fol ON fol.id_folio = ff.id_folio
-      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = fol.id_centro_costo
-      LEFT JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_folio = ff.id_folio
-      WHERE ff.id_factura = @idFactura
+        cc.SapCodigo AS centro_costo_codigo,
+        fol.PeriodoDesde,
+        fol.PeriodoHasta,
+        total_movimientos       = COUNT_BIG(cf.IdCabeceraFlete),
+        monto_total_movimientos = COALESCE(SUM(cf.MontoAplicado), 0)
+      FROM [cfl].[FacturaFolio] ff
+      INNER JOIN [cfl].[Folio] fol ON fol.IdFolio = ff.IdFolio
+      LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = fol.IdCentroCosto
+      LEFT JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = ff.IdFolio
+      WHERE ff.IdFactura = @idFactura
       GROUP BY
-        ff.id_factura_folio, ff.id_folio, fol.folio_numero, fol.estado,
-        fol.id_centro_costo, cc.nombre, cc.sap_codigo,
-        fol.periodo_desde, fol.periodo_hasta
-      ORDER BY ff.id_factura_folio;
+        ff.IdFacturaFolio, ff.IdFolio, fol.FolioNumero, fol.estado,
+        fol.IdCentroCosto, cc.nombre, cc.SapCodigo,
+        fol.PeriodoDesde, fol.PeriodoHasta
+      ORDER BY ff.IdFacturaFolio;
     `);
 
   // Movimientos de todos los folios de esta factura
@@ -226,39 +226,39 @@ async function fetchFactura(pool, idFactura) {
     .input('idFactura', sql.BigInt, idFactura)
     .query(`
       SELECT
-        cf.id_cabecera_flete,
-        cf.id_folio,
-        fol.folio_numero,
-        cf.sap_numero_entrega,
-        cf.numero_entrega,
-        cf.guia_remision,
-        cf.tipo_movimiento,
+        cf.IdCabeceraFlete,
+        cf.IdFolio,
+        fol.FolioNumero,
+        cf.SapNumeroEntrega,
+        cf.NumeroEntrega,
+        cf.GuiaRemision,
+        cf.TipoMovimiento,
         cf.estado,
-        cf.fecha_salida,
-        cf.monto_aplicado,
+        cf.FechaSalida,
+        cf.MontoAplicado,
         tipo_flete_nombre  = tf.nombre,
-        tipo_flete_codigo  = tf.sap_codigo,
+        tipo_flete_codigo  = tf.SapCodigo,
         centro_costo       = cc.nombre,
-        centro_costo_codigo = cc.sap_codigo,
-        ruta = COALESCE(r.nombre_ruta,
+        centro_costo_codigo = cc.SapCodigo,
+        ruta = COALESCE(r.NombreRuta,
           CASE WHEN no.nombre IS NOT NULL OR nd.nombre IS NOT NULL
             THEN CONCAT(COALESCE(no.nombre,'Origen'), ' -> ', COALESCE(nd.nombre,'Destino'))
             ELSE NULL END
         ),
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), NULL)
-      FROM [cfl].[CFL_factura_folio] ff
-      INNER JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_folio = ff.id_folio
-      INNER JOIN [cfl].[CFL_folio] fol ON fol.id_folio = cf.id_folio
-      LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
-      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo
-      LEFT JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp ON emp.id_empresa = mv.id_empresa_transporte
-      LEFT JOIN [cfl].[CFL_tarifa] tar ON tar.id_tarifa = cf.id_tarifa
-      LEFT JOIN [cfl].[CFL_ruta] r ON r.id_ruta = tar.id_ruta
-      LEFT JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = r.id_origen_nodo
-      LEFT JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = r.id_destino_nodo
-      WHERE ff.id_factura = @idFactura
-      ORDER BY cf.fecha_salida, cf.id_cabecera_flete;
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL)
+      FROM [cfl].[FacturaFolio] ff
+      INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = ff.IdFolio
+      INNER JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
+      LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
+      LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+      LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
+      LEFT JOIN [cfl].[Tarifa] tar ON tar.IdTarifa = cf.IdTarifa
+      LEFT JOIN [cfl].[Ruta] r ON r.IdRuta = tar.IdRuta
+      LEFT JOIN [cfl].[NodoLogistico] no ON no.IdNodo = r.IdOrigenNodo
+      LEFT JOIN [cfl].[NodoLogistico] nd ON nd.IdNodo = r.IdDestinoNodo
+      WHERE ff.IdFactura = @idFactura
+      ORDER BY cf.FechaSalida, cf.IdCabeceraFlete;
     `);
 
   return { ...factura, folios: foliosResult.recordset, movimientos: movResult.recordset };
@@ -279,34 +279,34 @@ router.get('/empresas-elegibles', async (req, res, next) => {
 
     const result = await pool.request().query(`
       SELECT DISTINCT
-        et.id_empresa,
+        et.IdEmpresa,
         et.rut,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(et.razon_social)), ''), CONCAT('Empresa #', et.id_empresa)),
-        et.sap_codigo,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(et.RazonSocial)), ''), CONCAT('Empresa #', et.IdEmpresa)),
+        et.SapCodigo,
         folios_disponibles = (
-          SELECT COUNT(DISTINCT f2.id_folio)
-          FROM [cfl].[CFL_folio] f2
-          INNER JOIN [cfl].[CFL_cabecera_flete] cf2 ON cf2.id_folio = f2.id_folio
-          INNER JOIN [cfl].[CFL_movil] mv2 ON mv2.id_movil = cf2.id_movil
-          WHERE mv2.id_empresa_transporte = et.id_empresa
+          SELECT COUNT(DISTINCT f2.IdFolio)
+          FROM [cfl].[Folio] f2
+          INNER JOIN [cfl].[CabeceraFlete] cf2 ON cf2.IdFolio = f2.IdFolio
+          INNER JOIN [cfl].[Movil] mv2 ON mv2.IdMovil = cf2.IdMovil
+          WHERE mv2.IdEmpresaTransporte = et.IdEmpresa
             AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
-            AND f2.id_folio NOT IN (
-              SELECT ff2.id_folio
-              FROM [cfl].[CFL_factura_folio] ff2
-              INNER JOIN [cfl].[CFL_cabecera_factura] fac2 ON fac2.id_factura = ff2.id_factura
+            AND f2.IdFolio NOT IN (
+              SELECT ff2.IdFolio
+              FROM [cfl].[FacturaFolio] ff2
+              INNER JOIN [cfl].[CabeceraFactura] fac2 ON fac2.IdFactura = ff2.IdFactura
               WHERE LOWER(fac2.estado) != 'anulada'
             )
         )
-      FROM [cfl].[CFL_empresa_transporte] et
-      INNER JOIN [cfl].[CFL_movil] mv ON mv.id_empresa_transporte = et.id_empresa
-      INNER JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_movil = mv.id_movil
-      INNER JOIN [cfl].[CFL_folio] f ON f.id_folio = cf.id_folio
+      FROM [cfl].[EmpresaTransporte] et
+      INNER JOIN [cfl].[Movil] mv ON mv.IdEmpresaTransporte = et.IdEmpresa
+      INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdMovil = mv.IdMovil
+      INNER JOIN [cfl].[Folio] f ON f.IdFolio = cf.IdFolio
       WHERE UPPER(cf.estado) = 'ASIGNADO_FOLIO'
         AND et.activo = 1
-        AND f.id_folio NOT IN (
-          SELECT ff.id_folio
-          FROM [cfl].[CFL_factura_folio] ff
-          INNER JOIN [cfl].[CFL_cabecera_factura] fac ON fac.id_factura = ff.id_factura
+        AND f.IdFolio NOT IN (
+          SELECT ff.IdFolio
+          FROM [cfl].[FacturaFolio] ff
+          INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = ff.IdFactura
           WHERE LOWER(fac.estado) != 'anulada'
         )
       ORDER BY empresa_nombre;
@@ -337,51 +337,51 @@ router.get('/folios-elegibles', async (req, res, next) => {
       .query(`
         WITH eligible_folios AS (
           SELECT DISTINCT
-            f.id_folio
-          FROM [cfl].[CFL_folio] f
-          INNER JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_folio = f.id_folio
-          INNER JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
-          WHERE mv.id_empresa_transporte = @idEmpresa
+            f.IdFolio
+          FROM [cfl].[Folio] f
+          INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = f.IdFolio
+          INNER JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+          WHERE mv.IdEmpresaTransporte = @idEmpresa
             AND UPPER(cf.estado) = 'ASIGNADO_FOLIO'
-            AND f.id_folio NOT IN (
-              SELECT ff.id_folio
-              FROM [cfl].[CFL_factura_folio] ff
-              INNER JOIN [cfl].[CFL_cabecera_factura] fac ON fac.id_factura = ff.id_factura
+            AND f.IdFolio NOT IN (
+              SELECT ff.IdFolio
+              FROM [cfl].[FacturaFolio] ff
+              INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = ff.IdFactura
               WHERE LOWER(fac.estado) != 'anulada'
             )
         )
         SELECT
-          f.id_folio,
-          f.folio_numero,
+          f.IdFolio,
+          f.FolioNumero,
           f.estado AS estado_folio,
-          f.id_centro_costo,
+          f.IdCentroCosto,
           cc.nombre  AS centro_costo,
-          cc.sap_codigo AS centro_costo_codigo,
-          f.periodo_desde,
-          f.periodo_hasta,
-          total_movimientos       = COUNT_BIG(cf.id_cabecera_flete),
-          monto_neto_estimado     = COALESCE(SUM(cf.monto_aplicado), 0),
+          cc.SapCodigo AS centro_costo_codigo,
+          f.PeriodoDesde,
+          f.PeriodoHasta,
+          total_movimientos       = COUNT_BIG(cf.IdCabeceraFlete),
+          monto_neto_estimado     = COALESCE(SUM(cf.MontoAplicado), 0),
           primary_tipo_flete_id = (
-            SELECT TOP 1 cf2.id_tipo_flete
-            FROM [cfl].[CFL_cabecera_flete] cf2
-            WHERE cf2.id_folio = f.id_folio AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
-            GROUP BY cf2.id_tipo_flete ORDER BY COUNT(*) DESC
+            SELECT TOP 1 cf2.IdTipoFlete
+            FROM [cfl].[CabeceraFlete] cf2
+            WHERE cf2.IdFolio = f.IdFolio AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
+            GROUP BY cf2.IdTipoFlete ORDER BY COUNT(*) DESC
           ),
           primary_tipo_flete_nombre = (
             SELECT TOP 1 tf2.nombre
-            FROM [cfl].[CFL_cabecera_flete] cf2
-            INNER JOIN [cfl].[CFL_tipo_flete] tf2 ON tf2.id_tipo_flete = cf2.id_tipo_flete
-            WHERE cf2.id_folio = f.id_folio AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
-            GROUP BY cf2.id_tipo_flete, tf2.nombre ORDER BY COUNT(*) DESC
+            FROM [cfl].[CabeceraFlete] cf2
+            INNER JOIN [cfl].[TipoFlete] tf2 ON tf2.IdTipoFlete = cf2.IdTipoFlete
+            WHERE cf2.IdFolio = f.IdFolio AND UPPER(cf2.estado) = 'ASIGNADO_FOLIO'
+            GROUP BY cf2.IdTipoFlete, tf2.nombre ORDER BY COUNT(*) DESC
           )
         FROM eligible_folios ef
-        INNER JOIN [cfl].[CFL_folio] f ON f.id_folio = ef.id_folio
-        LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = f.id_centro_costo
-        LEFT JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_folio = f.id_folio AND UPPER(cf.estado) = 'ASIGNADO_FOLIO'
+        INNER JOIN [cfl].[Folio] f ON f.IdFolio = ef.IdFolio
+        LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = f.IdCentroCosto
+        LEFT JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = f.IdFolio AND UPPER(cf.estado) = 'ASIGNADO_FOLIO'
         GROUP BY
-          f.id_folio, f.folio_numero, f.estado, f.id_centro_costo,
-          cc.nombre, cc.sap_codigo, f.periodo_desde, f.periodo_hasta
-        ORDER BY f.folio_numero;
+          f.IdFolio, f.FolioNumero, f.estado, f.IdCentroCosto,
+          cc.nombre, cc.SapCodigo, f.PeriodoDesde, f.PeriodoHasta
+        ORDER BY f.FolioNumero;
       `);
 
     res.json({ data: result.recordset });
@@ -477,10 +477,10 @@ router.post('/generar', async (req, res, next) => {
         .input('createdAt',  sql.DateTime2(0),  now)
         .input('updatedAt',  sql.DateTime2(0),  now)
         .query(`
-          INSERT INTO [cfl].[CFL_cabecera_factura]
-            (id_empresa, numero_factura, fecha_emision, moneda, monto_neto, monto_iva,
-             monto_total, estado, criterio_agrupacion, created_at, updated_at)
-          OUTPUT INSERTED.id_factura
+          INSERT INTO [cfl].[CabeceraFactura]
+            (IdEmpresa, NumeroFactura, FechaEmision, moneda, MontoNeto, MontoIva,
+             MontoTotal, estado, CriterioAgrupacion, FechaCreacion, FechaActualizacion)
+          OUTPUT INSERTED.IdFactura
           VALUES
             (@idEmpresa, @numTemp, @fechaEm, @moneda, @montoNeto, @montoIva,
              @montoTotal, @estado, @criterio, @createdAt, @updatedAt);
@@ -495,9 +495,9 @@ router.post('/generar', async (req, res, next) => {
         .input('numeroFactura',  sql.VarChar(40), numeroFactura)
         .input('updatedAt',      sql.DateTime2(0), now)
         .query(`
-          UPDATE [cfl].[CFL_cabecera_factura]
-          SET numero_factura = @numeroFactura, updated_at = @updatedAt
-          WHERE id_factura = @idFactura;
+          UPDATE [cfl].[CabeceraFactura]
+          SET NumeroFactura = @numeroFactura, FechaActualizacion = @updatedAt
+          WHERE IdFactura = @idFactura;
         `);
 
       createdIds.push(idFactura);
@@ -509,7 +509,7 @@ router.post('/generar', async (req, res, next) => {
           .input('idFolio',   sql.BigInt, folioId)
           .input('createdAt', sql.DateTime2(0), now)
           .query(`
-            INSERT INTO [cfl].[CFL_factura_folio] (id_factura, id_folio, created_at)
+            INSERT INTO [cfl].[FacturaFolio] (IdFactura, IdFolio, FechaCreacion)
             VALUES (@idFactura, @idFolio, @createdAt);
           `);
       }
@@ -520,9 +520,9 @@ router.post('/generar', async (req, res, next) => {
       updReq.input('updatedAt', sql.DateTime2(0), now);
       grupo.ids_folio.forEach((fId, i) => updReq.input(`ff${i}`, sql.BigInt, fId));
       await updReq.query(`
-        UPDATE [cfl].[CFL_cabecera_flete]
-        SET estado = 'FACTURADO', updated_at = @updatedAt
-        WHERE id_folio IN (${folioParts})
+        UPDATE [cfl].[CabeceraFlete]
+        SET estado = 'FACTURADO', FechaActualizacion = @updatedAt
+        WHERE IdFolio IN (${folioParts})
           AND UPPER(estado) = 'ASIGNADO_FOLIO';
       `);
     }
@@ -548,7 +548,7 @@ router.get('/', async (req, res, next) => {
 
     if (empresa) {
       request.input('empresa', sql.BigInt, Number(empresa));
-      where += ' AND fac.id_empresa = @empresa';
+      where += ' AND fac.IdEmpresa = @empresa';
     }
     if (estado) {
       request.input('estado', sql.VarChar(20), String(estado).toLowerCase());
@@ -556,38 +556,38 @@ router.get('/', async (req, res, next) => {
     }
     if (desde) {
       request.input('desde', sql.Date, String(desde));
-      where += ' AND CAST(fac.fecha_emision AS DATE) >= @desde';
+      where += ' AND CAST(fac.FechaEmision AS DATE) >= @desde';
     }
     if (hasta) {
       request.input('hasta', sql.Date, String(hasta));
-      where += ' AND CAST(fac.fecha_emision AS DATE) <= @hasta';
+      where += ' AND CAST(fac.FechaEmision AS DATE) <= @hasta';
     }
 
     const result = await request.query(`
       SELECT
-        fac.id_factura,
-        fac.id_empresa,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), CONCAT('Empresa #', fac.id_empresa)),
-        fac.numero_factura,
-        fac.fecha_emision,
+        fac.IdFactura,
+        fac.IdEmpresa,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
+        fac.NumeroFactura,
+        fac.FechaEmision,
         fac.moneda,
-        fac.monto_neto,
-        fac.monto_iva,
-        fac.monto_total,
+        fac.MontoNeto,
+        fac.MontoIva,
+        fac.MontoTotal,
         fac.estado,
-        fac.criterio_agrupacion,
-        fac.observaciones,
-        fac.created_at,
-        fac.updated_at,
+        fac.CriterioAgrupacion,
+        fac.Observaciones,
+        fac.FechaCreacion,
+        fac.FechaActualizacion,
         cantidad_folios = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_factura_folio] ff
-          WHERE ff.id_factura = fac.id_factura
+          FROM [cfl].[FacturaFolio] ff
+          WHERE ff.IdFactura = fac.IdFactura
         )
-      FROM [cfl].[CFL_cabecera_factura] fac
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp ON emp.id_empresa = fac.id_empresa
+      FROM [cfl].[CabeceraFactura] fac
+      LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = fac.IdEmpresa
       ${where}
-      ORDER BY fac.fecha_emision DESC, fac.id_factura DESC;
+      ORDER BY fac.FechaEmision DESC, fac.IdFactura DESC;
     `);
 
     res.json({ data: result.recordset });
@@ -659,10 +659,10 @@ router.post('/:id/folios', async (req, res, next) => {
         .input('createdAt', sql.DateTime2(0), now)
         .query(`
           IF NOT EXISTS (
-            SELECT 1 FROM [cfl].[CFL_factura_folio]
-            WHERE id_factura = @idFactura AND id_folio = @idFolio
+            SELECT 1 FROM [cfl].[FacturaFolio]
+            WHERE IdFactura = @idFactura AND IdFolio = @idFolio
           )
-          INSERT INTO [cfl].[CFL_factura_folio] (id_factura, id_folio, created_at)
+          INSERT INTO [cfl].[FacturaFolio] (IdFactura, IdFolio, FechaCreacion)
           VALUES (@idFactura, @idFolio, @createdAt);
         `);
 
@@ -671,9 +671,9 @@ router.post('/:id/folios', async (req, res, next) => {
         .input('idFolio',    sql.BigInt, folioId)
         .input('updatedAt',  sql.DateTime2(0), now)
         .query(`
-          UPDATE [cfl].[CFL_cabecera_flete]
-          SET estado = 'FACTURADO', updated_at = @updatedAt
-          WHERE id_folio = @idFolio AND UPPER(estado) = 'ASIGNADO_FOLIO';
+          UPDATE [cfl].[CabeceraFlete]
+          SET estado = 'FACTURADO', FechaActualizacion = @updatedAt
+          WHERE IdFolio = @idFolio AND UPPER(estado) = 'ASIGNADO_FOLIO';
         `);
     }
 
@@ -720,8 +720,8 @@ router.delete('/:id/folios/:folio_id', async (req, res, next) => {
       .input('idFactura', sql.BigInt, idFactura)
       .input('idFolio',   sql.BigInt, idFolio)
       .query(`
-        DELETE FROM [cfl].[CFL_factura_folio]
-        WHERE id_factura = @idFactura AND id_folio = @idFolio;
+        DELETE FROM [cfl].[FacturaFolio]
+        WHERE IdFactura = @idFactura AND IdFolio = @idFolio;
       `);
 
     // Devolver fletes al estado ASIGNADO_FOLIO
@@ -729,9 +729,9 @@ router.delete('/:id/folios/:folio_id', async (req, res, next) => {
       .input('idFolio',   sql.BigInt, idFolio)
       .input('updatedAt', sql.DateTime2(0), now)
       .query(`
-        UPDATE [cfl].[CFL_cabecera_flete]
-        SET estado = 'ASIGNADO_FOLIO', updated_at = @updatedAt
-        WHERE id_folio = @idFolio AND UPPER(estado) = 'FACTURADO';
+        UPDATE [cfl].[CabeceraFlete]
+        SET estado = 'ASIGNADO_FOLIO', FechaActualizacion = @updatedAt
+        WHERE IdFolio = @idFolio AND UPPER(estado) = 'FACTURADO';
       `);
 
     await recalcularMontos(transaction, idFactura, now);
@@ -779,11 +779,11 @@ router.put('/:id', async (req, res, next) => {
       .input('criterioAgrupacion', sql.VarChar(30),  criterio_agrupacion ?? factura.criterio_agrupacion)
       .input('updatedAt',          sql.DateTime2(0), now)
       .query(`
-        UPDATE [cfl].[CFL_cabecera_factura]
-        SET observaciones      = @observaciones,
-            criterio_agrupacion = @criterioAgrupacion,
-            updated_at          = @updatedAt
-        WHERE id_factura = @idFactura;
+        UPDATE [cfl].[CabeceraFactura]
+        SET Observaciones      = @observaciones,
+            CriterioAgrupacion = @criterioAgrupacion,
+            FechaActualizacion          = @updatedAt
+        WHERE IdFactura = @idFactura;
       `);
 
     await transaction.commit();
@@ -839,9 +839,9 @@ router.patch('/:id/estado', async (req, res, next) => {
       .input('estado',     sql.VarChar(20), nuevoEstado)
       .input('updatedAt',  sql.DateTime2(0), now)
       .query(`
-        UPDATE [cfl].[CFL_cabecera_factura]
-        SET estado = @estado, updated_at = @updatedAt
-        WHERE id_factura = @idFactura;
+        UPDATE [cfl].[CabeceraFactura]
+        SET estado = @estado, FechaActualizacion = @updatedAt
+        WHERE IdFactura = @idFactura;
       `);
 
     // Si se anula: devolver fletes de todos los folios a ASIGNADO_FOLIO
@@ -853,9 +853,9 @@ router.patch('/:id/estado', async (req, res, next) => {
         updReq.input('updatedAt', sql.DateTime2(0), now);
         folioIds.forEach((fId, i) => updReq.input(`af${i}`, sql.BigInt, fId));
         await updReq.query(`
-          UPDATE [cfl].[CFL_cabecera_flete]
-          SET estado = 'ASIGNADO_FOLIO', updated_at = @updatedAt
-          WHERE id_folio IN (${inParts})
+          UPDATE [cfl].[CabeceraFlete]
+          SET estado = 'ASIGNADO_FOLIO', FechaActualizacion = @updatedAt
+          WHERE IdFolio IN (${inParts})
             AND UPPER(estado) = 'FACTURADO';
         `);
       }
@@ -1057,10 +1057,10 @@ async function recalcularMontos(transaction, idFactura, now) {
   const res = await new sql.Request(transaction)
     .input('idFactura', sql.BigInt, idFactura)
     .query(`
-      SELECT COALESCE(SUM(cf.monto_aplicado), 0) AS monto_neto
-      FROM [cfl].[CFL_factura_folio] ff
-      INNER JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_folio = ff.id_folio
-      WHERE ff.id_factura = @idFactura;
+      SELECT COALESCE(SUM(cf.MontoAplicado), 0) AS MontoNeto
+      FROM [cfl].[FacturaFolio] ff
+      INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = ff.IdFolio
+      WHERE ff.IdFactura = @idFactura;
     `);
 
   const montoNeto  = toN(res.recordset[0]?.monto_neto);
@@ -1074,12 +1074,12 @@ async function recalcularMontos(transaction, idFactura, now) {
     .input('montoTotal', sql.Decimal(18,2), montoTotal)
     .input('updatedAt',  sql.DateTime2(0),  now)
     .query(`
-      UPDATE [cfl].[CFL_cabecera_factura]
-      SET monto_neto  = @montoNeto,
-          monto_iva   = @montoIva,
-          monto_total = @montoTotal,
-          updated_at  = @updatedAt
-      WHERE id_factura = @idFactura;
+      UPDATE [cfl].[CabeceraFactura]
+      SET MontoNeto  = @montoNeto,
+          MontoIva   = @montoIva,
+          MontoTotal = @montoTotal,
+          FechaActualizacion  = @updatedAt
+      WHERE IdFactura = @idFactura;
     `);
 }
 

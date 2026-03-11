@@ -64,7 +64,7 @@ function normalizeValue(fieldName, value) {
     lower.startsWith("activo") ||
     lower.startsWith("activa") ||
     lower.startsWith("cerrada") ||
-    lower.includes("requiere_") ||
+    lower.includes("requiere") ||
     lower === "bloqueado";
 
   if (isBooleanField) {
@@ -74,12 +74,24 @@ function normalizeValue(fieldName, value) {
   return value;
 }
 
+function toSnakeCaseField(fieldName) {
+  return String(fieldName || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[\s\-]+/g, "_")
+    .toLowerCase();
+}
+
 function collectPayload(body, allowedFields) {
   const payload = {};
 
   for (const fieldName of allowedFields) {
-    if (Object.prototype.hasOwnProperty.call(body, fieldName)) {
-      payload[fieldName] = normalizeValue(fieldName, body[fieldName]);
+    const snakeField = toSnakeCaseField(fieldName);
+    const hasPascal = Object.prototype.hasOwnProperty.call(body, fieldName);
+    const hasSnake = Object.prototype.hasOwnProperty.call(body, snakeField);
+
+    if (hasPascal || hasSnake) {
+      const rawValue = hasPascal ? body[fieldName] : body[snakeField];
+      payload[fieldName] = normalizeValue(fieldName, rawValue);
     }
   }
 
@@ -116,30 +128,80 @@ function buildBaseFrom(entityConfig) {
   return `${entityConfig.table} ${entityConfig.alias}`;
 }
 
+function isInvalidObjectNameError(error) {
+  if (!error || typeof error !== "object") return false;
+  const number = Number(error.number || error.code || 0);
+  const message = String(error.message || "");
+  return number === 208 || /invalid object name/i.test(message);
+}
+
+async function fetchTiposFleteRows(pool) {
+  const sqlNuevo = `
+    SELECT
+      t.IdTipoFlete,
+      t.SapCodigo,
+      t.Nombre,
+      t.Activo,
+      t.IdCentroCosto,
+      cc.SapCodigo AS CentroCostoSapCodigo,
+      cc.Nombre AS CentroCostoNombre
+    FROM [cfl].[TipoFlete] t
+    INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto
+    ORDER BY t.Nombre ASC;
+  `;
+
+  try {
+    const result = await pool.request().query(sqlNuevo);
+    return result.recordset;
+  } catch (error) {
+    if (!isInvalidObjectNameError(error)) {
+      throw error;
+    }
+  }
+
+  // Compatibilidad temporal para ambientes aun no migrados al modelo PascalCase
+  const sqlLegado = `
+    SELECT
+      t.id_tipo_flete AS IdTipoFlete,
+      t.sap_codigo AS SapCodigo,
+      t.nombre AS Nombre,
+      t.activo AS Activo,
+      t.id_centro_costo AS IdCentroCosto,
+      cc.sap_codigo AS CentroCostoSapCodigo,
+      cc.nombre AS CentroCostoNombre
+    FROM [cfl].[CFL_tipo_flete] t
+    INNER JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = t.id_centro_costo
+    ORDER BY t.nombre ASC;
+  `;
+
+  const legacyResult = await pool.request().query(sqlLegado);
+  return legacyResult.recordset;
+}
+
 async function fetchFolioEstado(pool, idFolio) {
   const result = await pool
     .request()
     .input("idFolio", idFolio)
     .query(`
-      SELECT TOP 1 estado, folio_numero, bloqueado
-      FROM [cfl].[CFL_folio]
-      WHERE id_folio = @idFolio;
+      SELECT TOP 1 Estado, FolioNumero, Bloqueado
+      FROM [cfl].[Folio]
+      WHERE IdFolio = @idFolio;
     `);
   return result.recordset[0] || null;
 }
 
 function isFolioBlocked(folio) {
-  return folio?.bloqueado === true || folio?.bloqueado === 1;
+  return folio?.Bloqueado === true || folio?.Bloqueado === 1;
 }
 
 async function resolveDefaultFolioId(pool) {
   const result = await pool.request().query(`
-    SELECT TOP 1 id_folio
-    FROM [cfl].[CFL_folio]
-    WHERE LTRIM(RTRIM(CAST(folio_numero AS NVARCHAR(50)))) = '0'
-    ORDER BY id_folio ASC;
+    SELECT TOP 1 IdFolio
+    FROM [cfl].[Folio]
+    WHERE LTRIM(RTRIM(CAST(FolioNumero AS NVARCHAR(50)))) = '0'
+    ORDER BY IdFolio ASC;
   `);
-  return result.recordset[0] ? Number(result.recordset[0].id_folio) : null;
+  return result.recordset[0] ? Number(result.recordset[0].IdFolio) : null;
 }
 
 async function fetchEntityById(pool, entityConfig, id) {
@@ -173,47 +235,47 @@ async function getRelationsForEntity(pool, entity, id) {
   if (entity === "choferes") {
     const sql = `
       SELECT
-        m.id_movil,
-        m.activo AS movil_activo,
-        m.created_at AS movil_created_at,
-        m.updated_at AS movil_updated_at,
-        e.id_empresa,
-        e.sap_codigo AS empresa_sap_codigo,
-        e.rut AS empresa_rut,
-        e.razon_social AS empresa_razon_social,
-        e.activo AS empresa_activa,
-        c.id_camion,
-        c.sap_patente,
-        c.sap_carro,
-        c.activo AS camion_activo,
-        tc.id_tipo_camion,
-        tc.nombre AS tipo_camion_nombre,
-        MIN(cf.fecha_salida) AS periodo_desde,
-        MAX(cf.fecha_salida) AS periodo_hasta,
-        COUNT(cf.id_cabecera_flete) AS viajes
-      FROM [cfl].[CFL_movil] m
-      INNER JOIN [cfl].[CFL_empresa_transporte] e ON e.id_empresa = m.id_empresa_transporte
-      INNER JOIN [cfl].[CFL_camion] c ON c.id_camion = m.id_camion
-      INNER JOIN [cfl].[CFL_tipo_camion] tc ON tc.id_tipo_camion = c.id_tipo_camion
-      LEFT JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_movil = m.id_movil
-      WHERE m.id_chofer = @id
+        m.IdMovil,
+        m.Activo AS MovilActivo,
+        m.FechaCreacion AS MovilFechaCreacion,
+        m.FechaActualizacion AS MovilFechaActualizacion,
+        e.IdEmpresa,
+        e.SapCodigo AS EmpresaSapCodigo,
+        e.Rut AS EmpresaRut,
+        e.RazonSocial AS EmpresaRazonSocial,
+        e.Activo AS EmpresaActiva,
+        c.IdCamion,
+        c.SapPatente,
+        c.SapCarro,
+        c.Activo AS CamionActivo,
+        tc.IdTipoCamion,
+        tc.Nombre AS TipoCamionNombre,
+        MIN(cf.FechaSalida) AS PeriodoDesde,
+        MAX(cf.FechaSalida) AS PeriodoHasta,
+        COUNT(cf.IdCabeceraFlete) AS Viajes
+      FROM [cfl].[Movil] m
+      INNER JOIN [cfl].[EmpresaTransporte] e ON e.IdEmpresa = m.IdEmpresaTransporte
+      INNER JOIN [cfl].[Camion] c ON c.IdCamion = m.IdCamion
+      INNER JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = c.IdTipoCamion
+      LEFT JOIN [cfl].[CabeceraFlete] cf ON cf.IdMovil = m.IdMovil
+      WHERE m.IdChofer = @id
       GROUP BY
-        m.id_movil,
-        m.activo,
-        m.created_at,
-        m.updated_at,
-        e.id_empresa,
-        e.sap_codigo,
-        e.rut,
-        e.razon_social,
-        e.activo,
-        c.id_camion,
-        c.sap_patente,
-        c.sap_carro,
-        c.activo,
-        tc.id_tipo_camion,
-        tc.nombre
-      ORDER BY e.razon_social ASC, c.sap_patente ASC, c.sap_carro ASC;
+        m.IdMovil,
+        m.Activo,
+        m.FechaCreacion,
+        m.FechaActualizacion,
+        e.IdEmpresa,
+        e.SapCodigo,
+        e.Rut,
+        e.RazonSocial,
+        e.Activo,
+        c.IdCamion,
+        c.SapPatente,
+        c.SapCarro,
+        c.Activo,
+        tc.IdTipoCamion,
+        tc.Nombre
+      ORDER BY e.RazonSocial ASC, c.SapPatente ASC, c.SapCarro ASC;
     `;
 
     const result = await pool.request().input("id", id).query(sql);
@@ -226,47 +288,47 @@ async function getRelationsForEntity(pool, entity, id) {
   if (entity === "empresas-transporte" || entity === "transportistas") {
     const sql = `
       SELECT
-        m.id_movil,
-        m.activo AS movil_activo,
-        m.created_at AS movil_created_at,
-        m.updated_at AS movil_updated_at,
-        ch.id_chofer,
-        ch.sap_id_fiscal AS chofer_sap_id_fiscal,
-        ch.sap_nombre AS chofer_nombre,
-        ch.telefono AS chofer_telefono,
-        ch.activo AS chofer_activo,
-        c.id_camion,
-        c.sap_patente,
-        c.sap_carro,
-        c.activo AS camion_activo,
-        tc.id_tipo_camion,
-        tc.nombre AS tipo_camion_nombre,
-        MIN(cf.fecha_salida) AS periodo_desde,
-        MAX(cf.fecha_salida) AS periodo_hasta,
-        COUNT(cf.id_cabecera_flete) AS viajes
-      FROM [cfl].[CFL_movil] m
-      INNER JOIN [cfl].[CFL_chofer] ch ON ch.id_chofer = m.id_chofer
-      INNER JOIN [cfl].[CFL_camion] c ON c.id_camion = m.id_camion
-      INNER JOIN [cfl].[CFL_tipo_camion] tc ON tc.id_tipo_camion = c.id_tipo_camion
-      LEFT JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_movil = m.id_movil
-      WHERE m.id_empresa_transporte = @id
+        m.IdMovil,
+        m.Activo AS MovilActivo,
+        m.FechaCreacion AS MovilFechaCreacion,
+        m.FechaActualizacion AS MovilFechaActualizacion,
+        ch.IdChofer,
+        ch.SapIdFiscal AS ChoferSapIdFiscal,
+        ch.SapNombre AS ChoferNombre,
+        ch.Telefono AS ChoferTelefono,
+        ch.Activo AS ChoferActivo,
+        c.IdCamion,
+        c.SapPatente,
+        c.SapCarro,
+        c.Activo AS CamionActivo,
+        tc.IdTipoCamion,
+        tc.Nombre AS TipoCamionNombre,
+        MIN(cf.FechaSalida) AS PeriodoDesde,
+        MAX(cf.FechaSalida) AS PeriodoHasta,
+        COUNT(cf.IdCabeceraFlete) AS Viajes
+      FROM [cfl].[Movil] m
+      INNER JOIN [cfl].[Chofer] ch ON ch.IdChofer = m.IdChofer
+      INNER JOIN [cfl].[Camion] c ON c.IdCamion = m.IdCamion
+      INNER JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = c.IdTipoCamion
+      LEFT JOIN [cfl].[CabeceraFlete] cf ON cf.IdMovil = m.IdMovil
+      WHERE m.IdEmpresaTransporte = @id
       GROUP BY
-        m.id_movil,
-        m.activo,
-        m.created_at,
-        m.updated_at,
-        ch.id_chofer,
-        ch.sap_id_fiscal,
-        ch.sap_nombre,
-        ch.telefono,
-        ch.activo,
-        c.id_camion,
-        c.sap_patente,
-        c.sap_carro,
-        c.activo,
-        tc.id_tipo_camion,
-        tc.nombre
-      ORDER BY ch.sap_nombre ASC, c.sap_patente ASC, c.sap_carro ASC;
+        m.IdMovil,
+        m.Activo,
+        m.FechaCreacion,
+        m.FechaActualizacion,
+        ch.IdChofer,
+        ch.SapIdFiscal,
+        ch.SapNombre,
+        ch.Telefono,
+        ch.Activo,
+        c.IdCamion,
+        c.SapPatente,
+        c.SapCarro,
+        c.Activo,
+        tc.IdTipoCamion,
+        tc.Nombre
+      ORDER BY ch.SapNombre ASC, c.SapPatente ASC, c.SapCarro ASC;
     `;
 
     const result = await pool.request().input("id", id).query(sql);
@@ -279,44 +341,44 @@ async function getRelationsForEntity(pool, entity, id) {
   if (entity === "camiones") {
     const sql = `
       SELECT
-        m.id_movil,
-        m.activo AS movil_activo,
-        m.created_at AS movil_created_at,
-        m.updated_at AS movil_updated_at,
-        e.id_empresa,
-        e.sap_codigo AS empresa_sap_codigo,
-        e.rut AS empresa_rut,
-        e.razon_social AS empresa_razon_social,
-        e.activo AS empresa_activa,
-        ch.id_chofer,
-        ch.sap_id_fiscal AS chofer_sap_id_fiscal,
-        ch.sap_nombre AS chofer_nombre,
-        ch.telefono AS chofer_telefono,
-        ch.activo AS chofer_activo,
-        MIN(cf.fecha_salida) AS periodo_desde,
-        MAX(cf.fecha_salida) AS periodo_hasta,
-        COUNT(cf.id_cabecera_flete) AS viajes
-      FROM [cfl].[CFL_movil] m
-      INNER JOIN [cfl].[CFL_empresa_transporte] e ON e.id_empresa = m.id_empresa_transporte
-      INNER JOIN [cfl].[CFL_chofer] ch ON ch.id_chofer = m.id_chofer
-      LEFT JOIN [cfl].[CFL_cabecera_flete] cf ON cf.id_movil = m.id_movil
-      WHERE m.id_camion = @id
+        m.IdMovil,
+        m.Activo AS MovilActivo,
+        m.FechaCreacion AS MovilFechaCreacion,
+        m.FechaActualizacion AS MovilFechaActualizacion,
+        e.IdEmpresa,
+        e.SapCodigo AS EmpresaSapCodigo,
+        e.Rut AS EmpresaRut,
+        e.RazonSocial AS EmpresaRazonSocial,
+        e.Activo AS EmpresaActiva,
+        ch.IdChofer,
+        ch.SapIdFiscal AS ChoferSapIdFiscal,
+        ch.SapNombre AS ChoferNombre,
+        ch.Telefono AS ChoferTelefono,
+        ch.Activo AS ChoferActivo,
+        MIN(cf.FechaSalida) AS PeriodoDesde,
+        MAX(cf.FechaSalida) AS PeriodoHasta,
+        COUNT(cf.IdCabeceraFlete) AS Viajes
+      FROM [cfl].[Movil] m
+      INNER JOIN [cfl].[EmpresaTransporte] e ON e.IdEmpresa = m.IdEmpresaTransporte
+      INNER JOIN [cfl].[Chofer] ch ON ch.IdChofer = m.IdChofer
+      LEFT JOIN [cfl].[CabeceraFlete] cf ON cf.IdMovil = m.IdMovil
+      WHERE m.IdCamion = @id
       GROUP BY
-        m.id_movil,
-        m.activo,
-        m.created_at,
-        m.updated_at,
-        e.id_empresa,
-        e.sap_codigo,
-        e.rut,
-        e.razon_social,
-        e.activo,
-        ch.id_chofer,
-        ch.sap_id_fiscal,
-        ch.sap_nombre,
-        ch.telefono,
-        ch.activo
-      ORDER BY e.razon_social ASC, ch.sap_nombre ASC;
+        m.IdMovil,
+        m.Activo,
+        m.FechaCreacion,
+        m.FechaActualizacion,
+        e.IdEmpresa,
+        e.SapCodigo,
+        e.Rut,
+        e.RazonSocial,
+        e.Activo,
+        ch.IdChofer,
+        ch.SapIdFiscal,
+        ch.SapNombre,
+        ch.Telefono,
+        ch.Activo
+      ORDER BY e.RazonSocial ASC, ch.SapNombre ASC;
     `;
 
     const result = await pool.request().input("id", id).query(sql);
@@ -355,37 +417,37 @@ router.get("/folios/:id/movimientos", async (req, res, next) => {
 
     const query = `
       SELECT
-        cf.id_cabecera_flete,
-        sap_numero_entrega = COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega),
-        se.source_system,
-        cf.estado,
-        cf.fecha_salida,
-        cf.hora_salida,
-        cf.monto_aplicado,
-        tf.nombre AS tipo_flete_nombre,
-        cc.nombre AS centro_costo_nombre
-      FROM [cfl].[CFL_cabecera_flete] cf
-      LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
-      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo
-      LEFT JOIN [cfl].[CFL_flete_sap_entrega] fe ON fe.id_cabecera_flete = cf.id_cabecera_flete
-      LEFT JOIN [cfl].[CFL_sap_entrega] se ON se.id_sap_entrega = fe.id_sap_entrega
-      WHERE cf.id_folio = @idFolio
-      ORDER BY cf.updated_at DESC, cf.id_cabecera_flete DESC;
+        cf.IdCabeceraFlete,
+        SapNumeroEntrega = COALESCE(se.SapNumeroEntrega, cf.SapNumeroEntrega),
+        se.SistemaFuente,
+        cf.Estado,
+        cf.FechaSalida,
+        cf.HoraSalida,
+        cf.MontoAplicado,
+        tf.Nombre AS TipoFleteNombre,
+        cc.Nombre AS CentroCostoNombre
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
+      LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[FleteSapEntrega] fe ON fe.IdCabeceraFlete = cf.IdCabeceraFlete
+      LEFT JOIN [cfl].[SapEntrega] se ON se.IdSapEntrega = fe.IdSapEntrega
+      WHERE cf.IdFolio = @idFolio
+      ORDER BY cf.FechaActualizacion DESC, cf.IdCabeceraFlete DESC;
     `;
 
     const result = await pool.request().input("idFolio", idFolio).query(query);
     const data = result.recordset.map((row) => {
-      const normalized = normalizeLifecycleStatus(row.estado);
+      const normalized = normalizeLifecycleStatus(row.Estado);
       return {
         ...row,
-        estado: normalized,
+        Estado: normalized,
         can_desasignar: normalized === "ASIGNADO_FOLIO",
       };
     });
 
     res.json({
       id_folio: idFolio,
-      estado_folio: String(folio.estado || "").toUpperCase(),
+      estado_folio: String(folio.Estado || "").toUpperCase(),
       data,
       total: data.length,
     });
@@ -418,7 +480,7 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
       return;
     }
 
-    if (String(folio.estado || "").toUpperCase() !== "ABIERTO") {
+    if (String(folio.Estado || "").toUpperCase() !== "ABIERTO") {
       res.status(409).json({ error: "Solo se pueden asignar movimientos a folios en estado ABIERTO" });
       return;
     }
@@ -426,7 +488,7 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
       res.status(409).json({ error: "El folio esta bloqueado y no permite cambios" });
       return;
     }
-    const targetFolioNumero = String(folio.folio_numero || "").trim();
+    const targetFolioNumero = String(folio.FolioNumero || "").trim();
     if (targetFolioNumero === "0") {
       res.status(409).json({ error: "El folio 0 es reservado y no permite asignaciones manuales" });
       return;
@@ -438,15 +500,15 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
       .input("sapNumeroEntrega", sapNumeroEntrega)
       .query(`
         SELECT TOP 1
-          cf.id_cabecera_flete,
-          cf.id_folio,
-          cf.estado,
-          sap_numero_entrega = COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega)
-        FROM [cfl].[CFL_cabecera_flete] cf
-        LEFT JOIN [cfl].[CFL_flete_sap_entrega] fe ON fe.id_cabecera_flete = cf.id_cabecera_flete
-        LEFT JOIN [cfl].[CFL_sap_entrega] se ON se.id_sap_entrega = fe.id_sap_entrega
-        WHERE COALESCE(se.sap_numero_entrega, cf.sap_numero_entrega) = @sapNumeroEntrega
-        ORDER BY cf.updated_at DESC, cf.id_cabecera_flete DESC;
+          cf.IdCabeceraFlete,
+          cf.IdFolio,
+          cf.Estado,
+          SapNumeroEntrega = COALESCE(se.SapNumeroEntrega, cf.SapNumeroEntrega)
+        FROM [cfl].[CabeceraFlete] cf
+        LEFT JOIN [cfl].[FleteSapEntrega] fe ON fe.IdCabeceraFlete = cf.IdCabeceraFlete
+        LEFT JOIN [cfl].[SapEntrega] se ON se.IdSapEntrega = fe.IdSapEntrega
+        WHERE COALESCE(se.SapNumeroEntrega, cf.SapNumeroEntrega) = @sapNumeroEntrega
+        ORDER BY cf.FechaActualizacion DESC, cf.IdCabeceraFlete DESC;
       `);
 
     const target = lookup.recordset[0] || null;
@@ -455,7 +517,7 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
       return;
     }
 
-    const normalizedStatus = normalizeLifecycleStatus(target.estado);
+    const normalizedStatus = normalizeLifecycleStatus(target.Estado);
     if (!["ASIGNADO_FOLIO", "COMPLETADO"].includes(normalizedStatus)) {
       res.status(409).json({
         error: "El movimiento debe estar en estado COMPLETADO o ASIGNADO_FOLIO para gestion manual de folio",
@@ -467,17 +529,17 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
     const now = new Date();
     await pool
       .request()
-      .input("idCabeceraFlete", Number(target.id_cabecera_flete))
+      .input("idCabeceraFlete", Number(target.IdCabeceraFlete))
       .input("idFolio", idFolio)
       .input("targetEstado", targetEstado)
       .input("updatedAt", now)
       .query(`
-        UPDATE [cfl].[CFL_cabecera_flete]
+        UPDATE [cfl].[CabeceraFlete]
         SET
-          id_folio = @idFolio,
-          estado = @targetEstado,
-          updated_at = @updatedAt
-        WHERE id_cabecera_flete = @idCabeceraFlete;
+          IdFolio = @idFolio,
+          Estado = @targetEstado,
+          FechaActualizacion = @updatedAt
+        WHERE IdCabeceraFlete = @idCabeceraFlete;
       `);
 
     res.status(201).json({
@@ -485,8 +547,8 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
       role: auth.primaryRole,
       data: {
         id_folio: idFolio,
-        id_cabecera_flete: Number(target.id_cabecera_flete),
-        sap_numero_entrega: String(target.sap_numero_entrega || sapNumeroEntrega),
+        id_cabecera_flete: Number(target.IdCabeceraFlete),
+        sap_numero_entrega: String(target.SapNumeroEntrega || sapNumeroEntrega),
         estado: targetEstado,
       },
     });
@@ -518,7 +580,7 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
       res.status(404).json({ error: "Folio no encontrado" });
       return;
     }
-    if (String(folio.estado || "").toUpperCase() !== "ABIERTO") {
+    if (String(folio.Estado || "").toUpperCase() !== "ABIERTO") {
       res.status(409).json({ error: "Solo se pueden desasignar movimientos desde folios ABIERTO" });
       return;
     }
@@ -533,12 +595,12 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
       .input("idFolio", idFolio)
       .query(`
         SELECT TOP 1
-          id_cabecera_flete,
-          id_folio,
-          estado
-        FROM [cfl].[CFL_cabecera_flete]
-        WHERE id_cabecera_flete = @idCabeceraFlete
-          AND id_folio = @idFolio;
+          IdCabeceraFlete,
+          IdFolio,
+          Estado
+        FROM [cfl].[CabeceraFlete]
+        WHERE IdCabeceraFlete = @idCabeceraFlete
+          AND IdFolio = @idFolio;
       `);
 
     const target = lookup.recordset[0] || null;
@@ -547,7 +609,7 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
       return;
     }
 
-    const normalizedStatus = normalizeLifecycleStatus(target.estado);
+    const normalizedStatus = normalizeLifecycleStatus(target.Estado);
     if (!["ASIGNADO_FOLIO", "COMPLETADO"].includes(normalizedStatus)) {
       res.status(409).json({
         error: "Solo se pueden desasignar movimientos en estado ASIGNADO_FOLIO o COMPLETADO",
@@ -558,12 +620,12 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
 
     const defaultFolioId = await resolveDefaultFolioId(pool);
     if (!defaultFolioId) {
-      res.status(409).json({ error: "No existe folio por defecto (folio_numero = 0)" });
+      res.status(409).json({ error: "No existe folio por defecto (FolioNumero = 0)" });
       return;
     }
 
     const defaultFolio = await fetchFolioEstado(pool, defaultFolioId);
-    const defaultFolioNumero = String(defaultFolio?.folio_numero || "").trim();
+    const defaultFolioNumero = String(defaultFolio?.FolioNumero || "").trim();
     const targetEstado = defaultFolioNumero === "0" ? "COMPLETADO" : "ASIGNADO_FOLIO";
 
     const now = new Date();
@@ -574,12 +636,12 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
       .input("targetEstado", targetEstado)
       .input("updatedAt", now)
       .query(`
-        UPDATE [cfl].[CFL_cabecera_flete]
+        UPDATE [cfl].[CabeceraFlete]
         SET
-          id_folio = @defaultFolioId,
-          estado = @targetEstado,
-          updated_at = @updatedAt
-        WHERE id_cabecera_flete = @idCabeceraFlete;
+          IdFolio = @defaultFolioId,
+          Estado = @targetEstado,
+          FechaActualizacion = @updatedAt
+        WHERE IdCabeceraFlete = @idCabeceraFlete;
       `);
 
     res.json({
@@ -614,7 +676,7 @@ router.patch("/folios/:id/bloqueo", async (req, res, next) => {
       return;
     }
 
-    const folioNumero = String(folio.folio_numero || "").trim();
+    const folioNumero = String(folio.FolioNumero || "").trim();
     if (folioNumero === "0") {
       res.status(409).json({ error: "El folio 0 es reservado y no se puede bloquear" });
       return;
@@ -633,11 +695,11 @@ router.patch("/folios/:id/bloqueo", async (req, res, next) => {
     request.input("updatedAt", new Date());
 
     await request.query(`
-      UPDATE [cfl].[CFL_folio]
+      UPDATE [cfl].[Folio]
       SET
-        [bloqueado] = @bloqueado,
-        [updated_at] = @updatedAt
-      WHERE [id_folio] = @id;
+        [Bloqueado] = @bloqueado,
+        [FechaActualizacion] = @updatedAt
+      WHERE [IdFolio] = @id;
     `);
 
     const updatedRow = await fetchEntityById(pool, getEntityConfig("folios"), id);
@@ -663,10 +725,10 @@ router.get("/temporadas/activa", async (req, res, next) => {
     const pool = await getPool();
     const result = await pool.request().query(`
       SELECT TOP 1
-        id_temporada, codigo, nombre, fecha_inicio, fecha_fin, activa, cerrada
-      FROM [cfl].[CFL_temporada]
-      WHERE activa = 1 AND cerrada = 0
-      ORDER BY fecha_inicio DESC;
+        IdTemporada, Codigo, Nombre, FechaInicio, FechaFin, Activa, Cerrada
+      FROM [cfl].[Temporada]
+      WHERE Activa = 1 AND Cerrada = 0
+      ORDER BY FechaInicio DESC;
     `);
 
     if (!result.recordset[0]) {
@@ -699,10 +761,10 @@ router.get("/tarifas", async (req, res, next) => {
     // Si no se pasó temporada_id, buscar la temporada activa
     if (!temporadaId) {
       const activeResult = await pool.request().query(`
-        SELECT TOP 1 id_temporada FROM [cfl].[CFL_temporada]
-        WHERE activa = 1 AND cerrada = 0 ORDER BY fecha_inicio DESC;
+        SELECT TOP 1 IdTemporada FROM [cfl].[Temporada]
+        WHERE Activa = 1 AND Cerrada = 0 ORDER BY FechaInicio DESC;
       `);
-      temporadaId = activeResult.recordset[0]?.id_temporada || null;
+      temporadaId = activeResult.recordset[0]?.IdTemporada || null;
     }
 
     let sql;
@@ -713,7 +775,7 @@ router.get("/tarifas", async (req, res, next) => {
       sql = `
         SELECT ${entityConfig.listColumns.join(", ")}
         FROM ${buildBaseFrom(entityConfig)}
-        WHERE t.id_temporada = @temporadaId
+        WHERE t.IdTemporada = @temporadaId
         ORDER BY ${entityConfig.orderBy};
       `;
     } else {
@@ -757,11 +819,11 @@ router.get("/usuarios/:id/roles", async (req, res, next) => {
 
     const pool = await getPool();
     const result = await pool.request().input("id", id).query(`
-      SELECT r.id_rol, r.nombre, r.descripcion, r.activo
-      FROM [cfl].[CFL_usuario_rol] ur
-      INNER JOIN [cfl].[CFL_rol] r ON r.id_rol = ur.id_rol
-      WHERE ur.id_usuario = @id
-      ORDER BY r.nombre ASC;
+      SELECT r.IdRol, r.Nombre, r.Descripcion, r.Activo
+      FROM [cfl].[UsuarioRol] ur
+      INNER JOIN [cfl].[Rol] r ON r.IdRol = ur.IdRol
+      WHERE ur.IdUsuario = @id
+      ORDER BY r.Nombre ASC;
     `);
 
     res.json({ id_usuario: id, data: result.recordset, total: result.recordset.length });
@@ -792,7 +854,7 @@ router.post("/usuarios/:id/roles", async (req, res, next) => {
 
     // Verificar que el usuario existe
     const userCheck = await pool.request().input("id", id)
-      .query(`SELECT TOP 1 id_usuario FROM [cfl].[CFL_usuario] WHERE id_usuario = @id;`);
+      .query(`SELECT TOP 1 IdUsuario FROM [cfl].[Usuario] WHERE IdUsuario = @id;`);
     if (!userCheck.recordset[0]) {
       res.status(404).json({ error: "Usuario no encontrado" });
       return;
@@ -800,7 +862,7 @@ router.post("/usuarios/:id/roles", async (req, res, next) => {
 
     // Verificar que el rol existe
     const rolCheck = await pool.request().input("idRol", idRol)
-      .query(`SELECT TOP 1 id_rol FROM [cfl].[CFL_rol] WHERE id_rol = @idRol AND activo = 1;`);
+      .query(`SELECT TOP 1 IdRol FROM [cfl].[Rol] WHERE IdRol = @idRol AND Activo = 1;`);
     if (!rolCheck.recordset[0]) {
       res.status(404).json({ error: "Rol no encontrado o inactivo" });
       return;
@@ -812,9 +874,9 @@ router.post("/usuarios/:id/roles", async (req, res, next) => {
       .input("idRol", idRol)
       .query(`
         IF NOT EXISTS (
-          SELECT 1 FROM [cfl].[CFL_usuario_rol] WHERE id_usuario = @id AND id_rol = @idRol
+          SELECT 1 FROM [cfl].[UsuarioRol] WHERE IdUsuario = @id AND IdRol = @idRol
         )
-        INSERT INTO [cfl].[CFL_usuario_rol] (id_usuario, id_rol) VALUES (@id, @idRol);
+        INSERT INTO [cfl].[UsuarioRol] (IdUsuario, IdRol) VALUES (@id, @idRol);
       `);
 
     res.status(201).json({ message: "Rol asignado al usuario", id_usuario: id, id_rol: idRol });
@@ -842,8 +904,8 @@ router.delete("/usuarios/:id/roles/:id_rol", async (req, res, next) => {
       .input("id", id)
       .input("idRol", idRol)
       .query(`
-        DELETE FROM [cfl].[CFL_usuario_rol]
-        WHERE id_usuario = @id AND id_rol = @idRol;
+        DELETE FROM [cfl].[UsuarioRol]
+        WHERE IdUsuario = @id AND IdRol = @idRol;
       `);
 
     if (result.rowsAffected[0] === 0) {
@@ -881,9 +943,9 @@ router.patch("/usuarios/:id/estado", async (req, res, next) => {
       .input("activo", toBool(nuevoEstado))
       .input("updatedAt", new Date())
       .query(`
-        UPDATE [cfl].[CFL_usuario]
-        SET activo = @activo, updated_at = @updatedAt
-        WHERE id_usuario = @id;
+        UPDATE [cfl].[Usuario]
+        SET Activo = @activo, FechaActualizacion = @updatedAt
+        WHERE IdUsuario = @id;
       `);
 
     if (result.rowsAffected[0] === 0) {
@@ -916,24 +978,24 @@ router.post("/usuarios", async (req, res, next) => {
       return;
     }
 
-    const password_hash = await bcrypt.hash(password, 12);
+    const passwordHash = await bcrypt.hash(password, 12);
     const now = new Date();
 
     const pool = await getPool();
     const insertResult = await pool.request()
       .input("username", username)
       .input("email", email)
-      .input("password_hash", password_hash)
+      .input("passwordHash", passwordHash)
       .input("nombre", nombre || null)
       .input("apellido", apellido || null)
       .input("activo", activo !== undefined ? toBool(activo) : true)
       .input("createdAt", now)
       .input("updatedAt", now)
       .query(`
-        INSERT INTO [cfl].[CFL_usuario]
-          (username, email, password_hash, nombre, apellido, activo, created_at, updated_at)
-        OUTPUT INSERTED.id_usuario AS id
-        VALUES (@username, @email, @password_hash, @nombre, @apellido, @activo, @createdAt, @updatedAt);
+        INSERT INTO [cfl].[Usuario]
+          (Username, Email, PasswordHash, Nombre, Apellido, Activo, FechaCreacion, FechaActualizacion)
+        OUTPUT INSERTED.IdUsuario AS id
+        VALUES (@username, @email, @passwordHash, @nombre, @apellido, @activo, @createdAt, @updatedAt);
       `);
 
     const insertedId = insertResult.recordset[0].id;
@@ -944,18 +1006,18 @@ router.post("/usuarios", async (req, res, next) => {
         .input("idUsuario", insertedId)
         .input("idRol", Number(id_rol))
         .query(`
-          INSERT INTO [cfl].[CFL_usuario_rol] (id_usuario, id_rol) VALUES (@idUsuario, @idRol);
+          INSERT INTO [cfl].[UsuarioRol] (IdUsuario, IdRol) VALUES (@idUsuario, @idRol);
         `);
     }
 
-    // Devolver el usuario creado (sin password_hash)
+    // Devolver el usuario creado (sin PasswordHash)
     const entityConfig = MAINTAINERS["usuarios"];
     const insertedRow = await fetchEntityById(pool, entityConfig, insertedId);
 
     res.status(201).json({
       message: "Usuario creado",
       role: auth.primaryRole,
-      data: insertedRow || { id_usuario: insertedId },
+      data: insertedRow || { IdUsuario: insertedId },
     });
   } catch (error) {
     next(error);
@@ -978,9 +1040,17 @@ router.put("/usuarios/:id", async (req, res, next) => {
     const { username, email, password, nombre, apellido, activo, id_rol } = req.body || {};
     const now = new Date();
 
-    // Construir payload excluyendo password_hash (se maneja aparte)
+    // Construir payload excluyendo PasswordHash (se maneja aparte)
     const allowedFields = ["username", "email", "nombre", "apellido", "activo"];
     const payload = collectPayload(req.body || {}, allowedFields);
+
+    // Mapear claves de request body a columnas PascalCase
+    const dbPayload = {};
+    if (payload.username !== undefined) dbPayload["Username"] = payload.username;
+    if (payload.email !== undefined) dbPayload["Email"] = payload.email;
+    if (payload.nombre !== undefined) dbPayload["Nombre"] = payload.nombre;
+    if (payload.apellido !== undefined) dbPayload["Apellido"] = payload.apellido;
+    if (payload.activo !== undefined) dbPayload["Activo"] = payload.activo;
 
     // Si se envía password, hacer hash
     if (password) {
@@ -988,12 +1058,12 @@ router.put("/usuarios/:id", async (req, res, next) => {
         res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres" });
         return;
       }
-      payload["password_hash"] = await bcrypt.hash(password, 12);
+      dbPayload["PasswordHash"] = await bcrypt.hash(password, 12);
     }
 
-    payload["updated_at"] = now;
+    dbPayload["FechaActualizacion"] = now;
 
-    const fields = Object.keys(payload);
+    const fields = Object.keys(dbPayload);
     if (fields.length === 0) {
       res.status(400).json({ error: "No se recibieron campos para actualizar" });
       return;
@@ -1004,14 +1074,14 @@ router.put("/usuarios/:id", async (req, res, next) => {
     request.input("id", id);
 
     const setClause = fields.map((fieldName, index) => {
-      request.input(`p${index}`, payload[fieldName]);
+      request.input(`p${index}`, dbPayload[fieldName]);
       return `[${fieldName}] = @p${index}`;
     }).join(", ");
 
     const updateResult = await request.query(`
-      UPDATE [cfl].[CFL_usuario]
+      UPDATE [cfl].[Usuario]
       SET ${setClause}
-      WHERE id_usuario = @id;
+      WHERE IdUsuario = @id;
     `);
 
     if (updateResult.rowsAffected[0] === 0) {
@@ -1025,13 +1095,13 @@ router.put("/usuarios/:id", async (req, res, next) => {
       if (Number.isInteger(idRolNum) && idRolNum > 0) {
         // Reemplazar todos los roles del usuario
         await pool.request().input("id", id).query(`
-          DELETE FROM [cfl].[CFL_usuario_rol] WHERE id_usuario = @id;
+          DELETE FROM [cfl].[UsuarioRol] WHERE IdUsuario = @id;
         `);
         await pool.request()
           .input("id", id)
           .input("idRol", idRolNum)
           .query(`
-            INSERT INTO [cfl].[CFL_usuario_rol] (id_usuario, id_rol) VALUES (@id, @idRol);
+            INSERT INTO [cfl].[UsuarioRol] (IdUsuario, IdRol) VALUES (@id, @idRol);
           `);
       }
     }
@@ -1080,6 +1150,37 @@ router.get("/resumen", async (req, res, next) => {
       data: summary,
       role: auth?.primaryRole || null,
       generated_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Compatibilidad dedicada para catalogo critico de bandeja y mantenedor
+router.get("/tipos-flete", async (req, res, next) => {
+  try {
+    const auth = await resolveAuthContext(req);
+    const permissionEntityKey = normalizePermissionEntityKey("tipos-flete");
+    if (!hasAnyPermission(auth, maintainerReadPermissions(permissionEntityKey))) {
+      res.status(403).json({
+        error: "No tienes permisos para consultar este mantenedor",
+        role: auth?.primaryRole || null,
+        entity: "tipos-flete",
+      });
+      return;
+    }
+
+    const pool = await getPool();
+    const rows = await fetchTiposFleteRows(pool);
+
+    res.json({
+      data: rows,
+      total: rows.length,
+      permissions: {
+        role: auth.primaryRole,
+        can_view: true,
+        can_edit: hasAnyPermission(auth, maintainerWritePermissions(permissionEntityKey)),
+      },
     });
   } catch (error) {
     next(error);
@@ -1228,8 +1329,8 @@ router.post("/:entity", async (req, res, next) => {
     const allowedFields = [...entityConfig.create.required, ...entityConfig.create.optional];
     const payload = collectPayload(req.body || {}, allowedFields);
 
-    if (req.params.entity === "folios" && payload.bloqueado === undefined) {
-      payload.bloqueado = false;
+    if (req.params.entity === "folios" && payload.Bloqueado === undefined) {
+      payload.Bloqueado = false;
     }
 
     const missingRequired = entityConfig.create.required.filter(
@@ -1316,7 +1417,7 @@ router.put("/:entity/:id", async (req, res, next) => {
         res.status(404).json({ error: `${entityConfig.title} no encontrado` });
         return;
       }
-      const folioNumero = String(folio.folio_numero || "").trim();
+      const folioNumero = String(folio.FolioNumero || "").trim();
       if (folioNumero === "0") {
         res.status(409).json({ error: "El folio 0 es reservado y no se puede modificar" });
         return;
@@ -1379,7 +1480,7 @@ router.delete("/:entity/:id", async (req, res, next) => {
     if (req.params.entity === "folios") {
       const folio = await fetchFolioEstado(pool, id);
       if (folio) {
-        const folioNumero = String(folio.folio_numero || "").trim();
+        const folioNumero = String(folio.FolioNumero || "").trim();
         if (folioNumero === "0") {
           res.status(409).json({ error: "El folio 0 es reservado y no se puede eliminar" });
           return;

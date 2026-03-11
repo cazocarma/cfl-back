@@ -19,31 +19,31 @@ const router = express.Router();
 
 function buildMissingDeliveriesQuery(filters) {
   const whereClauses = [
-    "NOT EXISTS (SELECT 1 FROM [cfl].[CFL_flete_sap_entrega] fe WHERE fe.id_sap_entrega = c.id_sap_entrega)",
-    "NOT EXISTS (SELECT 1 FROM [cfl].[CFL_sap_entrega_descarte] sd WHERE sd.id_sap_entrega = c.id_sap_entrega AND sd.activo = 1)",
+    "NOT EXISTS (SELECT 1 FROM [cfl].[FleteSapEntrega] fe WHERE fe.IdSapEntrega = c.IdSapEntrega)",
+    "NOT EXISTS (SELECT 1 FROM [cfl].[SapEntregaDescarte] sd WHERE sd.IdSapEntrega = c.IdSapEntrega AND sd.Activo = 1)",
   ];
 
   if (filters.search) {
-    // Soporta búsqueda por entrega, referencia, empresa transporte, chofer y patente.
+    // Soporta búsqueda por entrega, guia, empresa transporte, chofer y patente.
     whereClauses.push(`(
-      c.sap_numero_entrega LIKE @search
-      OR c.sap_referencia LIKE @search
-      OR c.sap_empresa_transporte LIKE @search
-      OR c.sap_nombre_chofer LIKE @search
-      OR c.sap_patente LIKE @search
+      c.SapNumeroEntrega LIKE @search
+      OR c.SapGuiaRemision LIKE @search
+      OR c.SapEmpresaTransporte LIKE @search
+      OR c.SapNombreChofer LIKE @search
+      OR c.SapPatente LIKE @search
     )`);
   }
   if (filters.sourceSystem) {
-    whereClauses.push("c.source_system = @sourceSystem");
+    whereClauses.push("c.SistemaFuente = @sourceSystem");
   }
   if (filters.fechaDesde) {
-    whereClauses.push("c.sap_fecha_salida >= @fechaDesde");
+    whereClauses.push("c.SapFechaSalida >= @fechaDesde");
   }
   if (filters.fechaHasta) {
-    whereClauses.push("c.sap_fecha_salida <= @fechaHasta");
+    whereClauses.push("c.SapFechaSalida <= @fechaHasta");
   }
   if (filters.estado) {
-    whereClauses.push("c.estado = @estado");
+    whereClauses.push("c.Estado = @estado");
   }
 
   return `
@@ -61,26 +61,49 @@ function hasAnyRole(auth, roles = []) {
   return roles.some((role) => roleSet.has(String(role || "").trim().toLowerCase()));
 }
 
+async function resolveProductorIdByDestinatario(transaction, explicitIdProductor, sapDestinatario) {
+  if (explicitIdProductor) return explicitIdProductor;
+
+  const destinatario = toNullableTrimmedString(sapDestinatario);
+  if (!destinatario) return null;
+
+  const result = await new sql.Request(transaction)
+    .input("destinatario", sql.NVarChar(40), destinatario)
+    .query(`
+      SELECT TOP 1 IdProductor
+      FROM [cfl].[Productor]
+      WHERE
+        NULLIF(LTRIM(RTRIM(CodigoProveedor)), '') = @destinatario
+        OR NULLIF(LTRIM(RTRIM(Rut)), '') = @destinatario
+      ORDER BY
+        CASE WHEN Activo = 1 THEN 0 ELSE 1 END,
+        CASE WHEN NULLIF(LTRIM(RTRIM(CodigoProveedor)), '') = @destinatario THEN 0 ELSE 1 END,
+        IdProductor ASC;
+    `);
+
+  return Number(result.recordset[0]?.IdProductor || 0) || null;
+}
+
 router.get("/resumen", async (req, res, next) => {
   try {
     const pool = await getPool();
     const query = `
       SELECT
-        total_entregas = (SELECT COUNT_BIG(1) FROM [cfl].[CFL_sap_entrega]),
-        total_asociadas = (SELECT COUNT_BIG(DISTINCT id_sap_entrega) FROM [cfl].[CFL_flete_sap_entrega]),
+        total_entregas = (SELECT COUNT_BIG(1) FROM [cfl].[SapEntrega]),
+        total_asociadas = (SELECT COUNT_BIG(DISTINCT IdSapEntrega) FROM [cfl].[FleteSapEntrega]),
         total_sin_cabecera = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_sap_entrega] e
+          FROM [cfl].[SapEntrega] e
           WHERE NOT EXISTS (
             SELECT 1
-            FROM [cfl].[CFL_flete_sap_entrega] fe
-            WHERE fe.id_sap_entrega = e.id_sap_entrega
+            FROM [cfl].[FleteSapEntrega] fe
+            WHERE fe.IdSapEntrega = e.IdSapEntrega
           )
           AND NOT EXISTS (
             SELECT 1
-            FROM [cfl].[CFL_sap_entrega_descarte] sd
-            WHERE sd.id_sap_entrega = e.id_sap_entrega
-              AND sd.activo = 1
+            FROM [cfl].[SapEntregaDescarte] sd
+            WHERE sd.IdSapEntrega = e.IdSapEntrega
+              AND sd.Activo = 1
           )
         );
     `;
@@ -134,136 +157,163 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
 
     const sqlQuery = `
       SELECT
-        source_system,
-        sap_numero_entrega,
-        sap_posicion,
-        sap_cantidad_entregada
+        SistemaFuente,
+        SapNumeroEntrega,
+        SapPosicion,
+        SapCantidadEntregada
       INTO #lips_current_pref
-      FROM [cfl].[vw_cfl_sap_lips_current];
+      FROM [cfl].[VW_LipsActual];
 
       SELECT
-        e.id_sap_entrega,
-        e.sap_numero_entrega,
-        e.source_system,
+        e.IdSapEntrega,
+        e.SapNumeroEntrega,
+        e.SistemaFuente,
 
-        sap_referencia = NULLIF(LTRIM(RTRIM(lk.sap_referencia)), ''),
-        sap_guia_remision = NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
-        sap_codigo_tipo_flete = NULLIF(LTRIM(RTRIM(lk.sap_codigo_tipo_flete)), ''),
-        sap_centro_costo = NULLIF(LTRIM(RTRIM(lk.sap_centro_costo)), ''),
-        sap_cuenta_mayor = NULLIF(LTRIM(RTRIM(lk.sap_cuenta_mayor)), ''),
-        sap_fecha_salida = lk.sap_fecha_salida,
-        sap_hora_salida = CONVERT(VARCHAR(8), lk.sap_hora_salida, 108),
-        sap_empresa_transporte = NULLIF(LTRIM(RTRIM(lk.sap_empresa_transporte)), ''),
-        sap_nombre_chofer = NULLIF(LTRIM(RTRIM(lk.sap_nombre_chofer)), ''),
-        sap_patente = NULLIF(LTRIM(RTRIM(lk.sap_patente)), ''),
-        sap_carro = NULLIF(LTRIM(RTRIM(lk.sap_carro)), ''),
-        sap_peso_total = lk.sap_peso_total,
-        sap_peso_neto = lk.sap_peso_neto,
+        SapGuiaRemision = NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), ''),
+        SapCodigoTipoFlete = NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''),
+        SapCentroCosto = NULLIF(LTRIM(RTRIM(lk.SapCentroCosto)), ''),
+        SapCuentaMayor = NULLIF(LTRIM(RTRIM(lk.SapCuentaMayor)), ''),
+        SapDestinatario = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), ''),
+        IdProductor = prod.IdProductor,
+        ProductorCodigoProveedor = prod.CodigoProveedor,
+        ProductorRut = prod.Rut,
+        ProductorNombre = prod.Nombre,
+        SapFechaSalida = lk.SapFechaSalida,
+        SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
+        SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
+        SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
+        SapPatente = NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
+        SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
+        SapPesoTotal = lk.SapPesoTotal,
+        SapPesoNeto = lk.SapPesoNeto,
 
-        posiciones_total = COUNT(lp.sap_posicion),
-        cantidad_entregada_total = COALESCE(SUM(CAST(lp.sap_cantidad_entregada AS DECIMAL(18,3))), 0),
+        posiciones_total = COUNT(lp.SapPosicion),
+        cantidad_entregada_total = COALESCE(SUM(CAST(lp.SapCantidadEntregada AS DECIMAL(18,3))), 0),
 
-        id_tipo_flete = tf.id_tipo_flete,
-        tipo_flete_nombre = tf.nombre,
-        id_centro_costo = COALESCE(cc_sap.id_centro_costo, tf.id_centro_costo),
+        IdTipoFlete = tf.IdTipoFlete,
+        tipo_flete_nombre = tf.Nombre,
+        IdCentroCosto = COALESCE(cc_sap.IdCentroCosto, tf.IdCentroCosto),
         -- Semantica: candidatos (aun no existe cabecera) => siempre DETECTADO.
-        estado = 'DETECTADO',
+        Estado = 'DETECTADO',
         puede_ingresar = CAST(
           CASE
-            WHEN tf.id_tipo_flete IS NULL THEN 0
-            WHEN COALESCE(cc_sap.id_centro_costo, tf.id_centro_costo) IS NULL THEN 0
-            WHEN lk.sap_fecha_salida IS NULL THEN 0
-            WHEN lk.sap_hora_salida IS NULL THEN 0
+            WHEN tf.IdTipoFlete IS NULL THEN 0
+            WHEN COALESCE(cc_sap.IdCentroCosto, tf.IdCentroCosto) IS NULL THEN 0
+            WHEN lk.SapFechaSalida IS NULL THEN 0
+            WHEN lk.SapHoraSalida IS NULL THEN 0
             ELSE 1
           END AS BIT
         ),
         motivo_no_ingreso = CASE
-          WHEN tf.id_tipo_flete IS NULL THEN CONCAT(
-            'Falta configurar Tipo de Flete para sap_codigo_tipo_flete=',
-            COALESCE(NULLIF(LTRIM(RTRIM(lk.sap_codigo_tipo_flete)), ''), '(NULL)')
+          WHEN tf.IdTipoFlete IS NULL THEN CONCAT(
+            'Falta configurar Tipo de Flete para SapCodigoTipoFlete=',
+            COALESCE(NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''), '(NULL)')
           )
-          WHEN COALESCE(cc_sap.id_centro_costo, tf.id_centro_costo) IS NULL THEN CONCAT(
-            'No se pudo resolver Centro de Costo (sap_centro_costo=',
-            COALESCE(NULLIF(LTRIM(RTRIM(lk.sap_centro_costo)), ''), '(NULL)'),
+          WHEN COALESCE(cc_sap.IdCentroCosto, tf.IdCentroCosto) IS NULL THEN CONCAT(
+            'No se pudo resolver Centro de Costo (SapCentroCosto=',
+            COALESCE(NULLIF(LTRIM(RTRIM(lk.SapCentroCosto)), ''), '(NULL)'),
             ')'
           )
-          WHEN lk.sap_fecha_salida IS NULL THEN 'Falta sap_fecha_salida'
-          WHEN lk.sap_hora_salida IS NULL THEN 'Falta sap_hora_salida'
+          WHEN lk.SapFechaSalida IS NULL THEN 'Falta SapFechaSalida'
+          WHEN lk.SapHoraSalida IS NULL THEN 'Falta SapHoraSalida'
           ELSE NULL
         END,
 
-        e.last_seen_at,
-        e.updated_at
+        e.FechaUltimaVista,
+        e.FechaActualizacion
       INTO #candidates
-      FROM [cfl].[CFL_sap_entrega] e
-      LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
-        ON lk.sap_numero_entrega = e.sap_numero_entrega
-       AND lk.source_system = e.source_system
+      FROM [cfl].[SapEntrega] e
+      LEFT JOIN [cfl].[VW_LikpActual] lk
+        ON lk.SapNumeroEntrega = e.SapNumeroEntrega
+       AND lk.SistemaFuente = e.SistemaFuente
       LEFT JOIN #lips_current_pref lp
-        ON lp.sap_numero_entrega = e.sap_numero_entrega
-       AND lp.source_system = e.source_system
-      LEFT JOIN [cfl].[CFL_tipo_flete] tf
-        ON tf.sap_codigo = lk.sap_codigo_tipo_flete
-      LEFT JOIN [cfl].[CFL_centro_costo] cc_sap
-        ON cc_sap.sap_codigo = lk.sap_centro_costo
+        ON lp.SapNumeroEntrega = e.SapNumeroEntrega
+       AND lp.SistemaFuente = e.SistemaFuente
+      LEFT JOIN [cfl].[TipoFlete] tf
+        ON tf.SapCodigo = lk.SapCodigoTipoFlete
+      LEFT JOIN [cfl].[CentroCosto] cc_sap
+        ON cc_sap.SapCodigo = lk.SapCentroCosto
+      OUTER APPLY (
+        SELECT TOP 1
+          p.IdProductor,
+          p.CodigoProveedor,
+          p.Rut,
+          p.Nombre
+        FROM [cfl].[Productor] p
+        WHERE
+          NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '')
+          OR NULLIF(LTRIM(RTRIM(p.Rut)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '')
+        ORDER BY
+          CASE WHEN p.Activo = 1 THEN 0 ELSE 1 END,
+          CASE WHEN NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '') THEN 0 ELSE 1 END,
+          p.IdProductor ASC
+      ) prod
       GROUP BY
-        e.id_sap_entrega,
-        e.sap_numero_entrega,
-        e.source_system,
-        lk.sap_referencia,
-        lk.sap_guia_remision,
-        lk.sap_codigo_tipo_flete,
-        lk.sap_centro_costo,
-        lk.sap_cuenta_mayor,
-        lk.sap_fecha_salida,
-        lk.sap_hora_salida,
-        lk.sap_empresa_transporte,
-        lk.sap_nombre_chofer,
-        lk.sap_patente,
-        lk.sap_carro,
-        lk.sap_peso_total,
-        lk.sap_peso_neto,
-        tf.id_tipo_flete,
-        tf.nombre,
-        tf.id_centro_costo,
-        cc_sap.id_centro_costo,
-        e.last_seen_at,
-        e.updated_at;
+        e.IdSapEntrega,
+        e.SapNumeroEntrega,
+        e.SistemaFuente,
+        lk.SapGuiaRemision,
+        lk.SapCodigoTipoFlete,
+        lk.SapCentroCosto,
+        lk.SapCuentaMayor,
+        lk.SapDestinatario,
+        prod.IdProductor,
+        prod.CodigoProveedor,
+        prod.Rut,
+        prod.Nombre,
+        lk.SapFechaSalida,
+        lk.SapHoraSalida,
+        lk.SapEmpresaTransporte,
+        lk.SapNombreChofer,
+        lk.SapPatente,
+        lk.SapCarro,
+        lk.SapPesoTotal,
+        lk.SapPesoNeto,
+        tf.IdTipoFlete,
+        tf.Nombre,
+        tf.IdCentroCosto,
+        cc_sap.IdCentroCosto,
+        e.FechaUltimaVista,
+        e.FechaActualizacion;
 
       SELECT total = COUNT_BIG(1)
       ${baseQuery};
 
       SELECT
-        id_sap_entrega,
-        sap_numero_entrega,
-        source_system,
-        sap_referencia,
-        sap_guia_remision,
-        sap_codigo_tipo_flete,
-        sap_centro_costo,
-        sap_cuenta_mayor,
-        sap_fecha_salida,
-        sap_hora_salida,
-        sap_empresa_transporte,
-        sap_nombre_chofer,
-        sap_patente,
-        sap_carro,
-        sap_peso_total,
-        sap_peso_neto,
+        IdSapEntrega,
+        SapNumeroEntrega,
+        SistemaFuente,
+        SapGuiaRemision,
+        SapCodigoTipoFlete,
+        SapCentroCosto,
+        SapCuentaMayor,
+        SapDestinatario,
+        IdProductor,
+        ProductorCodigoProveedor,
+        ProductorRut,
+        ProductorNombre,
+        SapFechaSalida,
+        SapHoraSalida,
+        SapEmpresaTransporte,
+        SapNombreChofer,
+        SapPatente,
+        SapCarro,
+        SapPesoTotal,
+        SapPesoNeto,
         posiciones_total,
         cantidad_entregada_total,
-        id_tipo_flete,
+        IdTipoFlete,
         tipo_flete_nombre,
-        id_centro_costo,
-        estado,
+        IdCentroCosto,
+        Estado,
         puede_ingresar,
         motivo_no_ingreso,
-        last_seen_at,
-        updated_at
+        FechaUltimaVista,
+        FechaActualizacion
       ${baseQuery}
       ORDER BY
-        COALESCE(CAST(sap_fecha_salida AS DATETIME2(0)), updated_at) DESC,
-        id_sap_entrega DESC
+        COALESCE(CAST(SapFechaSalida AS DATETIME2(0)), FechaActualizacion) DESC,
+        IdSapEntrega DESC
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
 
       DROP TABLE #candidates;
@@ -300,30 +350,51 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", async (req, res, nex
 
     const headerResult = await pool.request().input("idSapEntrega", sql.BigInt, idSapEntrega).query(`
       SELECT TOP 1
-        e.id_sap_entrega,
-        e.sap_numero_entrega,
-        e.source_system,
+        e.IdSapEntrega,
+        e.SapNumeroEntrega,
+        e.SistemaFuente,
 
-        sap_referencia = NULLIF(LTRIM(RTRIM(lk.sap_referencia)), ''),
-        sap_guia_remision = NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
-        sap_codigo_tipo_flete = NULLIF(LTRIM(RTRIM(lk.sap_codigo_tipo_flete)), ''),
-        sap_centro_costo = NULLIF(LTRIM(RTRIM(lk.sap_centro_costo)), ''),
-        sap_cuenta_mayor = NULLIF(LTRIM(RTRIM(lk.sap_cuenta_mayor)), ''),
-        sap_fecha_salida = lk.sap_fecha_salida,
-        sap_hora_salida = CONVERT(VARCHAR(8), lk.sap_hora_salida, 108),
-        sap_empresa_transporte = NULLIF(LTRIM(RTRIM(lk.sap_empresa_transporte)), ''),
-        sap_nombre_chofer = NULLIF(LTRIM(RTRIM(lk.sap_nombre_chofer)), ''),
-        sap_patente = NULLIF(LTRIM(RTRIM(lk.sap_patente)), ''),
-        sap_carro = NULLIF(LTRIM(RTRIM(lk.sap_carro)), ''),
-        sap_peso_total = lk.sap_peso_total,
-        sap_peso_neto = lk.sap_peso_neto,
-        e.last_seen_at,
-        e.updated_at
-      FROM [cfl].[CFL_sap_entrega] e
-      LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
-        ON lk.sap_numero_entrega = e.sap_numero_entrega
-       AND lk.source_system = e.source_system
-      WHERE e.id_sap_entrega = @idSapEntrega;
+        SapGuiaRemision = NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), ''),
+        SapCodigoTipoFlete = NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''),
+        SapCentroCosto = NULLIF(LTRIM(RTRIM(lk.SapCentroCosto)), ''),
+        SapCuentaMayor = NULLIF(LTRIM(RTRIM(lk.SapCuentaMayor)), ''),
+        SapDestinatario = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), ''),
+        IdProductor = prod.IdProductor,
+        ProductorCodigoProveedor = prod.CodigoProveedor,
+        ProductorRut = prod.Rut,
+        ProductorNombre = prod.Nombre,
+        ProductorEmail = prod.Email,
+        SapFechaSalida = lk.SapFechaSalida,
+        SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
+        SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
+        SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
+        SapPatente = NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
+        SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
+        SapPesoTotal = lk.SapPesoTotal,
+        SapPesoNeto = lk.SapPesoNeto,
+        e.FechaUltimaVista,
+        e.FechaActualizacion
+      FROM [cfl].[SapEntrega] e
+      LEFT JOIN [cfl].[VW_LikpActual] lk
+        ON lk.SapNumeroEntrega = e.SapNumeroEntrega
+       AND lk.SistemaFuente = e.SistemaFuente
+      OUTER APPLY (
+        SELECT TOP 1
+          p.IdProductor,
+          p.CodigoProveedor,
+          p.Rut,
+          p.Nombre,
+          p.Email
+        FROM [cfl].[Productor] p
+        WHERE
+          NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '')
+          OR NULLIF(LTRIM(RTRIM(p.Rut)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '')
+        ORDER BY
+          CASE WHEN p.Activo = 1 THEN 0 ELSE 1 END,
+          CASE WHEN NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '') THEN 0 ELSE 1 END,
+          p.IdProductor ASC
+      ) prod
+      WHERE e.IdSapEntrega = @idSapEntrega;
     `);
 
     const cabecera = headerResult.recordset[0];
@@ -334,23 +405,23 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", async (req, res, nex
 
     const positionsResult = await pool
       .request()
-      .input("sourceSystem", sql.VarChar(50), cabecera.source_system)
-      .input("sapNumeroEntrega", sql.VarChar(20), cabecera.sap_numero_entrega)
+      .input("sourceSystem", sql.VarChar(50), cabecera.SistemaFuente)
+      .input("sapNumeroEntrega", sql.VarChar(20), cabecera.SapNumeroEntrega)
       .query(`
         SELECT
-          sap_posicion,
-          sap_material,
-          sap_denominacion_material,
-          sap_cantidad_entregada,
-          sap_unidad_peso,
-          sap_centro,
-          sap_almacen,
-          sap_posicion_superior,
-          sap_lote
-        FROM [cfl].[vw_cfl_sap_lips_current]
-        WHERE source_system = @sourceSystem
-          AND sap_numero_entrega = @sapNumeroEntrega
-        ORDER BY sap_posicion ASC;
+          SapPosicion,
+          SapMaterial,
+          SapDenominacionMaterial,
+          SapCantidadEntregada,
+          SapUnidadPeso,
+          SapCentro,
+          SapAlmacen,
+          SapPosicionSuperior,
+          SapLote
+        FROM [cfl].[VW_LipsActual]
+        WHERE SistemaFuente = @sourceSystem
+          AND SapNumeroEntrega = @sapNumeroEntrega
+        ORDER BY SapPosicion ASC;
       `);
 
     res.json({
@@ -370,6 +441,8 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
   const offset = (page - 1) * pageSize;
   const estadoFiltro = toNullableTrimmedString(req.query.estado);
   const searchRaw = toNullableTrimmedString(req.query.search);
+  const fechaDesdeRaw = toNullableTrimmedString(req.query.fecha_desde);
+  const fechaHastaRaw = toNullableTrimmedString(req.query.fecha_hasta);
 
   try {
     const pool = await getPool();
@@ -378,139 +451,172 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
     request.input("pageSize", pageSize);
     request.input("estadoFiltro", sql.VarChar(30), estadoFiltro ? estadoFiltro.toUpperCase() : null);
     request.input("search", sql.VarChar(100), searchRaw ? `%${searchRaw}%` : null);
+    request.input("fechaDesde", sql.VarChar(10), fechaDesdeRaw || null);
+    request.input("fechaHasta", sql.VarChar(10), fechaHastaRaw || null);
 
     const querySql = `
       ;WITH detalle_counts AS (
         SELECT
-          id_cabecera_flete,
+          IdCabeceraFlete,
           total_detalles = COUNT_BIG(1)
-        FROM [cfl].[CFL_detalle_flete]
-        GROUP BY id_cabecera_flete
+        FROM [cfl].[DetalleFlete]
+        GROUP BY IdCabeceraFlete
       ),
       base AS (
       SELECT
-        cf.id_cabecera_flete,
-        cf.id_folio,
-        folio_numero = fol.folio_numero,
-        cf.estado AS estado_original,
-        cf.tipo_movimiento,
-        cf.fecha_salida,
-        cf.hora_salida,
-        cf.monto_aplicado,
-        cf.observaciones,
-        cf.id_tipo_flete,
-        cf.id_detalle_viaje,
-        cf.id_movil,
-        cf.id_tarifa,
-        cf.id_cuenta_mayor,
-        tf.nombre AS tipo_flete_nombre,
-        cf.id_centro_costo,
-        cc.nombre AS centro_costo_nombre,
+        cf.IdCabeceraFlete,
+        cf.IdFolio,
+        FolioNumero = fol.FolioNumero,
+        cf.Estado AS estado_original,
+        cf.TipoMovimiento,
+        cf.FechaSalida,
+        cf.HoraSalida,
+        cf.MontoAplicado,
+        cf.Observaciones,
+        cf.IdTipoFlete,
+        cf.IdDetalleViaje,
+        cf.IdMovil,
+        cf.IdTarifa,
+        cf.IdCuentaMayor,
+        IdProductor = COALESCE(cf.IdProductor, prod_sap.IdProductor),
+        ProductorCodigoProveedor = COALESCE(prod_cf.CodigoProveedor, prod_sap.CodigoProveedor),
+        ProductorRut = COALESCE(prod_cf.Rut, prod_sap.Rut),
+        ProductorNombre = COALESCE(prod_cf.Nombre, prod_sap.Nombre),
+        ProductorEmail = COALESCE(prod_cf.Email, prod_sap.Email),
+        cf.SentidoFlete,
+        tf.Nombre AS tipo_flete_nombre,
+        cf.IdCentroCosto,
+        cc.Nombre AS centro_costo_nombre,
         det.total_detalles,
-        cf.created_at,
-        cf.updated_at,
-        lk.created_at AS sap_updated_at,
+        cf.FechaCreacion,
+        cf.FechaActualizacion,
+        lk.FechaCreacion AS sap_updated_at,
 
-        e.id_sap_entrega,
-        sap_numero_entrega = NULLIF(LTRIM(RTRIM(e.sap_numero_entrega)), ''),
-        e.source_system,
-        sap_guia_remision = NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
-        cf.guia_remision,
-        cf.numero_entrega,
+        e.IdSapEntrega,
+        SapNumeroEntrega = NULLIF(LTRIM(RTRIM(e.SapNumeroEntrega)), ''),
+        e.SistemaFuente,
+        SapGuiaRemision = NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), ''),
+        cf.GuiaRemision,
+        cf.NumeroEntrega,
         -- numero_guia: prioridad confirmado > snapshot SAP en cabecera > live SAP > número entrega
         numero_guia = COALESCE(
-          NULLIF(LTRIM(RTRIM(cf.guia_remision)), ''),
-          NULLIF(LTRIM(RTRIM(cf.sap_guia_remision)), ''),
-          NULLIF(LTRIM(RTRIM(lk.sap_guia_remision)), ''),
-          NULLIF(LTRIM(RTRIM(cf.numero_entrega)), ''),
-          NULLIF(LTRIM(RTRIM(cf.sap_numero_entrega)), ''),
-          NULLIF(LTRIM(RTRIM(e.sap_numero_entrega)), '')
+          NULLIF(LTRIM(RTRIM(cf.GuiaRemision)), ''),
+          NULLIF(LTRIM(RTRIM(cf.SapGuiaRemision)), ''),
+          NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), ''),
+          NULLIF(LTRIM(RTRIM(cf.NumeroEntrega)), ''),
+          NULLIF(LTRIM(RTRIM(cf.SapNumeroEntrega)), ''),
+          NULLIF(LTRIM(RTRIM(e.SapNumeroEntrega)), '')
         ),
-        sap_empresa_transporte = NULLIF(LTRIM(RTRIM(lk.sap_empresa_transporte)), ''),
-        sap_nombre_chofer = NULLIF(LTRIM(RTRIM(lk.sap_nombre_chofer)), ''),
-        sap_patente = NULLIF(LTRIM(RTRIM(lk.sap_patente)), ''),
-        sap_carro = NULLIF(LTRIM(RTRIM(lk.sap_carro)), ''),
-        id_ruta = r.id_ruta,
-        ruta_nombre = NULLIF(LTRIM(RTRIM(r.nombre_ruta)), ''),
-        ruta_origen_nombre = NULLIF(LTRIM(RTRIM(no.nombre)), ''),
-        ruta_destino_nombre = NULLIF(LTRIM(RTRIM(nd.nombre)), ''),
-        movil_empresa = NULLIF(LTRIM(RTRIM(et.razon_social)), ''),
-        movil_chofer_rut = NULLIF(LTRIM(RTRIM(ch.sap_id_fiscal)), ''),
-        movil_chofer_nombre = NULLIF(LTRIM(RTRIM(ch.sap_nombre)), ''),
-        movil_tipo_camion = NULLIF(LTRIM(RTRIM(tc.nombre)), ''),
-        movil_patente = NULLIF(LTRIM(RTRIM(cam.sap_patente)), ''),
+        SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
+        SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
+        SapPatente = NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
+        SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
+        SapDestinatario = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), ''),
+        IdRuta = r.IdRuta,
+        ruta_nombre = NULLIF(LTRIM(RTRIM(r.NombreRuta)), ''),
+        ruta_origen_nombre = NULLIF(LTRIM(RTRIM(no.Nombre)), ''),
+        ruta_destino_nombre = NULLIF(LTRIM(RTRIM(nd.Nombre)), ''),
+        movil_empresa = NULLIF(LTRIM(RTRIM(et.RazonSocial)), ''),
+        movil_chofer_rut = NULLIF(LTRIM(RTRIM(ch.SapIdFiscal)), ''),
+        movil_chofer_nombre = NULLIF(LTRIM(RTRIM(ch.SapNombre)), ''),
+        movil_tipo_camion = NULLIF(LTRIM(RTRIM(tc.Nombre)), ''),
+        movil_patente = NULLIF(LTRIM(RTRIM(cam.SapPatente)), ''),
         estado_lifecycle = CASE
-          WHEN UPPER(ISNULL(cf.estado, '')) = 'ANULADO' THEN 'ANULADO'
-          WHEN UPPER(ISNULL(cf.estado, '')) = 'FACTURADO' THEN 'FACTURADO'
-          WHEN COALESCE(cf.id_folio, 0) > 0
-            AND ISNULL(LTRIM(RTRIM(CAST(fol.folio_numero AS NVARCHAR(50)))), '') <> '0'
+          WHEN UPPER(ISNULL(cf.Estado, '')) = 'ANULADO' THEN 'ANULADO'
+          WHEN UPPER(ISNULL(cf.Estado, '')) = 'FACTURADO' THEN 'FACTURADO'
+          WHEN COALESCE(cf.IdFolio, 0) > 0
+            AND ISNULL(LTRIM(RTRIM(CAST(fol.FolioNumero AS NVARCHAR(50)))), '') <> '0'
             THEN 'ASIGNADO_FOLIO'
-          WHEN lk.created_at IS NOT NULL AND cf.updated_at IS NOT NULL AND lk.created_at > cf.updated_at THEN 'ACTUALIZADO'
-          WHEN cf.id_tipo_flete IS NOT NULL
-            AND cf.id_centro_costo IS NOT NULL
-            AND cf.id_detalle_viaje IS NOT NULL
-            AND cf.id_movil IS NOT NULL
-            AND cf.id_tarifa IS NOT NULL
+          WHEN lk.FechaCreacion IS NOT NULL AND cf.FechaActualizacion IS NOT NULL AND lk.FechaCreacion > cf.FechaActualizacion THEN 'ACTUALIZADO'
+          WHEN cf.IdTipoFlete IS NOT NULL
+            AND cf.IdCentroCosto IS NOT NULL
+            AND cf.IdDetalleViaje IS NOT NULL
+            AND cf.IdMovil IS NOT NULL
+            AND cf.IdTarifa IS NOT NULL
             AND COALESCE(det.total_detalles, 0) > 0 THEN 'COMPLETADO'
           ELSE 'EN_REVISION'
         END
-      FROM [cfl].[CFL_cabecera_flete] cf
-      LEFT JOIN [cfl].[CFL_folio] fol ON fol.id_folio = cf.id_folio
-      LEFT JOIN [cfl].[CFL_tipo_flete] tf ON tf.id_tipo_flete = cf.id_tipo_flete
-      LEFT JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = cf.id_centro_costo
-      LEFT JOIN [cfl].[CFL_movil] mv ON mv.id_movil = cf.id_movil
-      LEFT JOIN [cfl].[CFL_empresa_transporte] et ON et.id_empresa = mv.id_empresa_transporte
-      LEFT JOIN [cfl].[CFL_chofer] ch ON ch.id_chofer = mv.id_chofer
-      LEFT JOIN [cfl].[CFL_camion] cam ON cam.id_camion = mv.id_camion
-      LEFT JOIN [cfl].[CFL_tipo_camion] tc ON tc.id_tipo_camion = cam.id_tipo_camion
-      LEFT JOIN [cfl].[CFL_tarifa] tfa ON tfa.id_tarifa = cf.id_tarifa
-      LEFT JOIN [cfl].[CFL_ruta] r ON r.id_ruta = tfa.id_ruta
-      LEFT JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = r.id_origen_nodo
-      LEFT JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = r.id_destino_nodo
-      LEFT JOIN detalle_counts det ON det.id_cabecera_flete = cf.id_cabecera_flete
-      LEFT JOIN [cfl].[CFL_flete_sap_entrega] fe ON fe.id_cabecera_flete = cf.id_cabecera_flete
-      LEFT JOIN [cfl].[CFL_sap_entrega] e ON e.id_sap_entrega = fe.id_sap_entrega
-      LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
-        ON lk.sap_numero_entrega = e.sap_numero_entrega
-       AND lk.source_system = e.source_system
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
+      LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
+      LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+      LEFT JOIN [cfl].[EmpresaTransporte] et ON et.IdEmpresa = mv.IdEmpresaTransporte
+      LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
+      LEFT JOIN [cfl].[Camion] cam ON cam.IdCamion = mv.IdCamion
+      LEFT JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = cam.IdTipoCamion
+      LEFT JOIN [cfl].[Productor] prod_cf ON prod_cf.IdProductor = cf.IdProductor
+      LEFT JOIN [cfl].[Tarifa] tfa ON tfa.IdTarifa = cf.IdTarifa
+      LEFT JOIN [cfl].[Ruta] r ON r.IdRuta = tfa.IdRuta
+      LEFT JOIN [cfl].[NodoLogistico] no ON no.IdNodo = r.IdOrigenNodo
+      LEFT JOIN [cfl].[NodoLogistico] nd ON nd.IdNodo = r.IdDestinoNodo
+      LEFT JOIN detalle_counts det ON det.IdCabeceraFlete = cf.IdCabeceraFlete
+      LEFT JOIN [cfl].[FleteSapEntrega] fe ON fe.IdCabeceraFlete = cf.IdCabeceraFlete
+      LEFT JOIN [cfl].[SapEntrega] e ON e.IdSapEntrega = fe.IdSapEntrega
+      LEFT JOIN [cfl].[VW_LikpActual] lk
+        ON lk.SapNumeroEntrega = e.SapNumeroEntrega
+       AND lk.SistemaFuente = e.SistemaFuente
+      OUTER APPLY (
+        SELECT TOP 1
+          p.IdProductor,
+          p.CodigoProveedor,
+          p.Rut,
+          p.Nombre,
+          p.Email
+        FROM [cfl].[Productor] p
+        WHERE
+          NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '')
+          OR NULLIF(LTRIM(RTRIM(p.Rut)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '')
+        ORDER BY
+          CASE WHEN p.Activo = 1 THEN 0 ELSE 1 END,
+          CASE WHEN NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), '') THEN 0 ELSE 1 END,
+          p.IdProductor ASC
+      ) prod_sap
       )
 
       SELECT
         total_rows = COUNT_BIG(1) OVER(),
-        id_cabecera_flete,
-        id_folio,
-        folio_numero,
-        estado = estado_lifecycle,
+        IdCabeceraFlete,
+        IdFolio,
+        FolioNumero,
+        Estado = estado_lifecycle,
         estado_original,
-        tipo_movimiento,
-        fecha_salida,
-        hora_salida,
-        monto_aplicado,
-        observaciones,
-        id_tipo_flete,
-        id_detalle_viaje,
-        id_movil,
-        id_tarifa,
-        id_cuenta_mayor,
+        TipoMovimiento,
+        FechaSalida,
+        HoraSalida,
+        MontoAplicado,
+        Observaciones,
+        IdTipoFlete,
+        IdDetalleViaje,
+        IdMovil,
+        IdTarifa,
+        IdCuentaMayor,
+        IdProductor,
+        ProductorCodigoProveedor,
+        ProductorRut,
+        ProductorNombre,
+        ProductorEmail,
+        SentidoFlete,
         tipo_flete_nombre,
-        id_centro_costo,
+        IdCentroCosto,
         centro_costo_nombre,
         total_detalles,
-        created_at,
-        updated_at,
+        FechaCreacion,
+        FechaActualizacion,
         sap_updated_at,
-        id_sap_entrega,
-        sap_numero_entrega,
-        source_system,
-        sap_guia_remision,
-        guia_remision,
-        numero_entrega,
+        IdSapEntrega,
+        SapNumeroEntrega,
+        SistemaFuente,
+        SapGuiaRemision,
+        GuiaRemision,
+        NumeroEntrega,
         numero_guia,
-        sap_empresa_transporte,
-        sap_nombre_chofer,
-        sap_patente,
-        sap_carro,
-        id_ruta,
+        SapEmpresaTransporte,
+        SapNombreChofer,
+        SapPatente,
+        SapCarro,
+        SapDestinatario,
+        IdRuta,
         ruta_nombre,
         ruta_origen_nombre,
         ruta_destino_nombre,
@@ -532,8 +638,13 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
           OR movil_chofer_nombre LIKE @search
           OR movil_patente LIKE @search
           OR tipo_flete_nombre LIKE @search
+          OR ProductorNombre LIKE @search
+          OR ProductorCodigoProveedor LIKE @search
+          OR ProductorRut LIKE @search
         )
-      ORDER BY updated_at DESC, id_cabecera_flete DESC
+        AND (@fechaDesde IS NULL OR FechaSalida >= CAST(@fechaDesde AS DATE))
+        AND (@fechaHasta IS NULL OR FechaSalida <= CAST(@fechaHasta AS DATE))
+      ORDER BY FechaActualizacion DESC, IdCabeceraFlete DESC
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
     `;
 
@@ -599,9 +710,9 @@ router.post("/folios/asignar", async (req, res, next) => {
     const folioResult = await new sql.Request(transaction)
       .input("idFolio", sql.BigInt, idFolio)
       .query(`
-        SELECT TOP 1 id_folio, bloqueado, estado, folio_numero
-        FROM [cfl].[CFL_folio]
-        WHERE id_folio = @idFolio;
+        SELECT TOP 1 IdFolio, Bloqueado, Estado, FolioNumero
+        FROM [cfl].[Folio]
+        WHERE IdFolio = @idFolio;
       `);
 
     const folio = folioResult.recordset[0];
@@ -611,13 +722,13 @@ router.post("/folios/asignar", async (req, res, next) => {
       return;
     }
 
-    if (folio.bloqueado === true || folio.bloqueado === 1) {
+    if (folio.Bloqueado === true || folio.Bloqueado === 1) {
       await transaction.rollback();
       res.status(409).json({ error: "El folio esta bloqueado" });
       return;
     }
 
-    const targetFolioNumero = String(folio.folio_numero || "").trim();
+    const targetFolioNumero = String(folio.FolioNumero || "").trim();
     const targetFolioIsDefault = targetFolioNumero === "0";
 
     const invalid = [];
@@ -627,13 +738,13 @@ router.post("/folios/asignar", async (req, res, next) => {
         .input("idCabecera", sql.BigInt, idCabecera)
         .query(`
           SELECT TOP 1
-            cf.id_cabecera_flete,
-            cf.estado,
-            cf.id_folio,
-            folio_numero = f.folio_numero
-          FROM [cfl].[CFL_cabecera_flete] cf
-          LEFT JOIN [cfl].[CFL_folio] f ON f.id_folio = cf.id_folio
-          WHERE cf.id_cabecera_flete = @idCabecera;
+            cf.IdCabeceraFlete,
+            cf.Estado,
+            cf.IdFolio,
+            FolioNumero = f.FolioNumero
+          FROM [cfl].[CabeceraFlete] cf
+          LEFT JOIN [cfl].[Folio] f ON f.IdFolio = cf.IdFolio
+          WHERE cf.IdCabeceraFlete = @idCabecera;
         `);
 
       const row = rowResult.recordset[0];
@@ -642,13 +753,13 @@ router.post("/folios/asignar", async (req, res, next) => {
         continue;
       }
       const folioNumeroActual = String(row.folio_numero || "").trim();
-      const folioValue = row.id_folio === null || row.id_folio === undefined ? 0 : Number(row.id_folio);
+      const folioValue = row.IdFolio === null || row.IdFolio === undefined ? 0 : Number(row.IdFolio);
       const folioEsDefault = folioNumeroActual === "0";
-      const normalizedEstado = normalizeLifecycleStatus(row.estado);
+      const normalizedEstado = normalizeLifecycleStatus(row.Estado);
       const estadoElegible = normalizedEstado === LIFECYCLE_STATUS.COMPLETADO
         || (folioEsDefault && normalizedEstado === LIFECYCLE_STATUS.ASIGNADO_FOLIO);
       if (!estadoElegible) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.estado}` });
+        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.Estado}` });
         continue;
       }
       if (folioValue !== 0 && !folioEsDefault) {
@@ -670,11 +781,11 @@ router.post("/folios/asignar", async (req, res, next) => {
         .input("estadoAsignado", sql.VarChar(20), targetFolioIsDefault ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.ASIGNADO_FOLIO)
         .input("updatedAt", sql.DateTime2(0), now)
         .query(`
-          UPDATE [cfl].[CFL_cabecera_flete]
-          SET id_folio = @idFolio,
-              estado = @estadoAsignado,
-              updated_at = @updatedAt
-          WHERE id_cabecera_flete = @idCabecera;
+          UPDATE [cfl].[CabeceraFlete]
+          SET IdFolio = @idFolio,
+              Estado = @estadoAsignado,
+              FechaActualizacion = @updatedAt
+          WHERE IdCabeceraFlete = @idCabecera;
         `);
     }
 
@@ -741,15 +852,15 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         .input("idCabecera", sql.BigInt, idCabecera)
         .query(`
           SELECT TOP 1
-            cf.id_cabecera_flete,
-            cf.estado,
-            cf.id_folio,
-            cf.id_centro_costo,
-            cf.fecha_salida,
-            folio_numero = f.folio_numero
-          FROM [cfl].[CFL_cabecera_flete] cf
-          LEFT JOIN [cfl].[CFL_folio] f ON f.id_folio = cf.id_folio
-          WHERE cf.id_cabecera_flete = @idCabecera;
+            cf.IdCabeceraFlete,
+            cf.Estado,
+            cf.IdFolio,
+            cf.IdCentroCosto,
+            cf.FechaSalida,
+            FolioNumero = f.FolioNumero
+          FROM [cfl].[CabeceraFlete] cf
+          LEFT JOIN [cfl].[Folio] f ON f.IdFolio = cf.IdFolio
+          WHERE cf.IdCabeceraFlete = @idCabecera;
         `);
 
       const row = rowResult.recordset[0];
@@ -759,14 +870,14 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       }
 
       const folioNumeroActual = String(row.folio_numero || "").trim();
-      const folioValue = row.id_folio === null || row.id_folio === undefined ? 0 : Number(row.id_folio);
+      const folioValue = row.IdFolio === null || row.IdFolio === undefined ? 0 : Number(row.IdFolio);
       const folioEsDefault = folioNumeroActual === "0";
-      const normalizedEstado = normalizeLifecycleStatus(row.estado);
+      const normalizedEstado = normalizeLifecycleStatus(row.Estado);
       const estadoElegible = normalizedEstado === LIFECYCLE_STATUS.COMPLETADO
         || (folioEsDefault && normalizedEstado === LIFECYCLE_STATUS.ASIGNADO_FOLIO);
 
       if (!estadoElegible) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.estado}` });
+        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.Estado}` });
         continue;
       }
       if (folioValue !== 0 && !folioEsDefault) {
@@ -774,15 +885,15 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         continue;
       }
 
-      const idCentroCosto = Number(row.id_centro_costo || 0);
+      const idCentroCosto = Number(row.IdCentroCosto || 0);
       if (!Number.isInteger(idCentroCosto) || idCentroCosto <= 0) {
         invalid.push({ id_cabecera_flete: idCabecera, reason: "Centro de costo invalido" });
         continue;
       }
       centerCostSet.add(idCentroCosto);
 
-      if (row.fecha_salida) {
-        salidaDates.push(new Date(row.fecha_salida));
+      if (row.FechaSalida) {
+        salidaDates.push(new Date(row.FechaSalida));
       }
     }
 
@@ -805,13 +916,13 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
     const idCentroCosto = Number(centerCosts[0]);
 
     const temporadaResult = await new sql.Request(transaction).query(`
-      SELECT TOP 1 id_temporada
-      FROM [cfl].[CFL_temporada]
-      WHERE activa = 1
-      ORDER BY CASE WHEN ISNULL(cerrada, 0) = 0 THEN 0 ELSE 1 END, fecha_inicio DESC, id_temporada DESC;
+      SELECT TOP 1 IdTemporada
+      FROM [cfl].[Temporada]
+      WHERE Activa = 1
+      ORDER BY CASE WHEN ISNULL(Cerrada, 0) = 0 THEN 0 ELSE 1 END, FechaInicio DESC, IdTemporada DESC;
     `);
 
-    const idTemporada = Number(temporadaResult.recordset[0]?.id_temporada || 0);
+    const idTemporada = Number(temporadaResult.recordset[0]?.IdTemporada || 0);
     if (!Number.isInteger(idTemporada) || idTemporada <= 0) {
       await transaction.rollback();
       res.status(409).json({ error: "No existe una temporada activa para crear folio" });
@@ -822,9 +933,9 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
     const temporadaLockResult = await new sql.Request(transaction)
       .input("idTemporada", sql.BigInt, idTemporada)
       .query(`
-        SELECT TOP 1 id_temporada
-        FROM [cfl].[CFL_temporada] WITH (UPDLOCK, HOLDLOCK)
-        WHERE id_temporada = @idTemporada;
+        SELECT TOP 1 IdTemporada
+        FROM [cfl].[Temporada] WITH (UPDLOCK, HOLDLOCK)
+        WHERE IdTemporada = @idTemporada;
       `);
 
     if (!temporadaLockResult.recordset[0]) {
@@ -837,10 +948,10 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       .input("idTemporada", sql.BigInt, idTemporada)
       .query(`
         SELECT
-          next_num = COALESCE(MAX(TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(folio_numero)), ''))), 0) + 1
-        FROM [cfl].[CFL_folio] WITH (UPDLOCK, HOLDLOCK)
-        WHERE id_temporada = @idTemporada
-          AND TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(folio_numero)), '')) IS NOT NULL;
+          next_num = COALESCE(MAX(TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(FolioNumero)), ''))), 0) + 1
+        FROM [cfl].[Folio] WITH (UPDLOCK, HOLDLOCK)
+        WHERE IdTemporada = @idTemporada
+          AND TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(FolioNumero)), '')) IS NOT NULL;
       `);
 
     const folioNumero = String(nextNumberResult.recordset[0]?.next_num || "1");
@@ -862,18 +973,18 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       .input("createdAt", sql.DateTime2(0), now)
       .input("updatedAt", sql.DateTime2(0), now)
       .query(`
-        INSERT INTO [cfl].[CFL_folio] (
-          [id_centro_costo],
-          [id_temporada],
-          [folio_numero],
-          [periodo_desde],
-          [periodo_hasta],
-          [estado],
-          [bloqueado],
-          [created_at],
-          [updated_at]
+        INSERT INTO [cfl].[Folio] (
+          [IdCentroCosto],
+          [IdTemporada],
+          [FolioNumero],
+          [PeriodoDesde],
+          [PeriodoHasta],
+          [Estado],
+          [Bloqueado],
+          [FechaCreacion],
+          [FechaActualizacion]
         )
-        OUTPUT INSERTED.id_folio
+        OUTPUT INSERTED.IdFolio
         VALUES (
           @idCentroCosto,
           @idTemporada,
@@ -887,7 +998,7 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         );
       `);
 
-    const idFolio = Number(createFolioResult.recordset[0]?.id_folio || 0);
+    const idFolio = Number(createFolioResult.recordset[0]?.IdFolio || 0);
     if (!Number.isInteger(idFolio) || idFolio <= 0) {
       await transaction.rollback();
       res.status(500).json({ error: "No se pudo crear el folio" });
@@ -901,11 +1012,11 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         .input("estadoAsignado", sql.VarChar(20), LIFECYCLE_STATUS.ASIGNADO_FOLIO)
         .input("updatedAt", sql.DateTime2(0), now)
         .query(`
-          UPDATE [cfl].[CFL_cabecera_flete]
-          SET id_folio = @idFolio,
-              estado = @estadoAsignado,
-              updated_at = @updatedAt
-          WHERE id_cabecera_flete = @idCabecera;
+          UPDATE [cfl].[CabeceraFlete]
+          SET IdFolio = @idFolio,
+              Estado = @estadoAsignado,
+              FechaActualizacion = @updatedAt
+          WHERE IdCabeceraFlete = @idCabecera;
         `);
     }
 
@@ -984,9 +1095,9 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
     await transaction.begin();
 
     const current = await new sql.Request(transaction).input("idCabecera", sql.BigInt, idCabecera).query(`
-      SELECT TOP 1 id_cabecera_flete, estado
-      FROM [cfl].[CFL_cabecera_flete]
-      WHERE id_cabecera_flete = @idCabecera;
+      SELECT TOP 1 IdCabeceraFlete, Estado
+      FROM [cfl].[CabeceraFlete]
+      WHERE IdCabeceraFlete = @idCabecera;
     `);
 
     const row = current.recordset[0];
@@ -996,7 +1107,7 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
       return;
     }
 
-    const normalized = normalizeLifecycleStatus(row.estado);
+    const normalized = normalizeLifecycleStatus(row.Estado);
     if (normalized === LIFECYCLE_STATUS.FACTURADO) {
       await transaction.rollback();
       res.status(409).json({ error: "Un flete FACTURADO no se puede anular" });
@@ -1012,17 +1123,17 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
       .input("idUsuario", sql.BigInt, idUsuarioActor)
       .input("motivo", sql.VarChar(200), motivoFinal)
       .query(`
-        UPDATE [cfl].[CFL_cabecera_flete]
-        SET estado = @estado,
-            updated_at = @updatedAt
-        WHERE id_cabecera_flete = @idCabecera;
+        UPDATE [cfl].[CabeceraFlete]
+        SET Estado = @estado,
+            FechaActualizacion = @updatedAt
+        WHERE IdCabeceraFlete = @idCabecera;
 
-        INSERT INTO [cfl].[CFL_flete_estado_historial] (
-          [id_cabecera_flete],
-          [estado],
-          [fecha_hora],
-          [id_usuario],
-          [motivo]
+        INSERT INTO [cfl].[FleteEstadoHistorial] (
+          [IdCabeceraFlete],
+          [Estado],
+          [FechaHora],
+          [IdUsuario],
+          [Motivo]
         )
         VALUES (
           @idCabecera,
@@ -1102,9 +1213,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
     const entregaResult = await new sql.Request(transaction)
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
-        SELECT TOP 1 id_sap_entrega
-        FROM [cfl].[CFL_sap_entrega]
-        WHERE id_sap_entrega = @idSapEntrega;
+        SELECT TOP 1 IdSapEntrega
+        FROM [cfl].[SapEntrega]
+        WHERE IdSapEntrega = @idSapEntrega;
       `);
 
     if (entregaResult.recordset.length === 0) {
@@ -1117,8 +1228,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
         SELECT TOP 1 1 AS already_linked
-        FROM [cfl].[CFL_flete_sap_entrega]
-        WHERE id_sap_entrega = @idSapEntrega;
+        FROM [cfl].[FleteSapEntrega]
+        WHERE IdSapEntrega = @idSapEntrega;
       `);
 
     if (linkedResult.recordset.length > 0) {
@@ -1132,9 +1243,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
     const currentDiscardResult = await new sql.Request(transaction)
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
-        SELECT TOP 1 id_sap_entrega_descarte
-        FROM [cfl].[CFL_sap_entrega_descarte]
-        WHERE id_sap_entrega = @idSapEntrega;
+        SELECT TOP 1 IdSapEntregaDescarte
+        FROM [cfl].[SapEntregaDescarte]
+        WHERE IdSapEntrega = @idSapEntrega;
       `);
 
     if (currentDiscardResult.recordset.length > 0) {
@@ -1145,15 +1256,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
         .input("createdAt", sql.DateTime2(0), now)
         .input("createdBy", sql.BigInt, idUsuarioActor)
         .query(`
-          UPDATE [cfl].[CFL_sap_entrega_descarte]
-          SET activo = 1,
-              motivo = @motivo,
-              created_at = @createdAt,
-              updated_at = @updatedAt,
-              created_by = @createdBy,
-              restored_at = NULL,
-              restored_by = NULL
-          WHERE id_sap_entrega = @idSapEntrega;
+          UPDATE [cfl].[SapEntregaDescarte]
+          SET Activo = 1,
+              Motivo = @motivo,
+              FechaCreacion = @createdAt,
+              FechaActualizacion = @updatedAt,
+              CreadoPor = @createdBy,
+              FechaRestauracion = NULL,
+              RestauradoPor = NULL
+          WHERE IdSapEntrega = @idSapEntrega;
         `);
     } else {
       await new sql.Request(transaction)
@@ -1163,13 +1274,13 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
         .input("updatedAt", sql.DateTime2(0), now)
         .input("createdBy", sql.BigInt, idUsuarioActor)
         .query(`
-          INSERT INTO [cfl].[CFL_sap_entrega_descarte] (
-            [id_sap_entrega],
-            [activo],
-            [motivo],
-            [created_at],
-            [updated_at],
-            [created_by]
+          INSERT INTO [cfl].[SapEntregaDescarte] (
+            [IdSapEntrega],
+            [Activo],
+            [Motivo],
+            [FechaCreacion],
+            [FechaActualizacion],
+            [CreadoPor]
           )
           VALUES (
             @idSapEntrega,
@@ -1241,12 +1352,12 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/restaurar", async (req, res, 
       .input("restoredAt", sql.DateTime2(0), now)
       .input("restoredBy", sql.BigInt, idUsuarioActor)
       .query(`
-        UPDATE [cfl].[CFL_sap_entrega_descarte]
+        UPDATE [cfl].[SapEntregaDescarte]
         SET activo = 0,
-            updated_at = @updatedAt,
+            FechaActualizacion = @updatedAt,
             restored_at = @restoredAt,
             restored_by = @restoredBy
-        WHERE id_sap_entrega = @idSapEntrega
+        WHERE IdSapEntrega = @idSapEntrega
           AND activo = 1;
 
         SELECT @@ROWCOUNT AS affected;
@@ -1293,6 +1404,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
   const idCuentaMayor = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
+  const idProductor = parseOptionalBigInt(cabeceraIn.id_productor);
+  const sentidoFlete = toNullableTrimmedString(cabeceraIn.sentido_flete);
 
   if (!idTipoFlete) {
     res.status(400).json({ error: "Falta id_tipo_flete" });
@@ -1340,18 +1453,19 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
         SELECT TOP 1
-          e.id_sap_entrega,
-          e.sap_numero_entrega,
-          e.source_system,
-          lk.sap_codigo_tipo_flete,
-          lk.sap_centro_costo,
-          lk.sap_cuenta_mayor,
-          lk.sap_guia_remision
-        FROM [cfl].[CFL_sap_entrega] e
-        LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
-          ON lk.sap_numero_entrega = e.sap_numero_entrega
-         AND lk.source_system = e.source_system
-        WHERE e.id_sap_entrega = @idSapEntrega;
+          e.IdSapEntrega,
+          e.SapNumeroEntrega,
+          e.SistemaFuente,
+          lk.SapCodigoTipoFlete,
+          lk.SapCentroCosto,
+          lk.SapCuentaMayor,
+          lk.SapGuiaRemision,
+          lk.SapDestinatario
+        FROM [cfl].[SapEntrega] e
+        LEFT JOIN [cfl].[VW_LikpActual] lk
+          ON lk.SapNumeroEntrega = e.SapNumeroEntrega
+         AND lk.SistemaFuente = e.SistemaFuente
+        WHERE e.IdSapEntrega = @idSapEntrega;
       `);
 
     const entrega = entregaResult.recordset[0];
@@ -1365,8 +1479,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
         SELECT TOP 1 1 AS is_discarded
-        FROM [cfl].[CFL_sap_entrega_descarte]
-        WHERE id_sap_entrega = @idSapEntrega
+        FROM [cfl].[SapEntregaDescarte]
+        WHERE IdSapEntrega = @idSapEntrega
           AND activo = 1;
       `);
 
@@ -1380,8 +1494,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
         SELECT TOP 1 1 AS already_linked
-        FROM [cfl].[CFL_flete_sap_entrega]
-        WHERE id_sap_entrega = @idSapEntrega;
+        FROM [cfl].[FleteSapEntrega]
+        WHERE IdSapEntrega = @idSapEntrega;
       `);
 
     if (existsResult.recordset.length > 0) {
@@ -1396,18 +1510,18 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const tipoFleteCanonicalResult = await new sql.Request(transaction)
       .input("idTipoFlete", sql.BigInt, idTipoFlete)
       .query(`
-        SELECT TOP 1 sap_codigo
-        FROM [cfl].[CFL_tipo_flete]
-        WHERE id_tipo_flete = @idTipoFlete;
+        SELECT TOP 1 SapCodigo
+        FROM [cfl].[TipoFlete]
+        WHERE IdTipoFlete = @idTipoFlete;
       `);
     const tipoFleteCanonicoSug = toNullableTrimmedString(tipoFleteCanonicalResult.recordset[0]?.sap_codigo);
 
     const centroCostoCanonicalResult = await new sql.Request(transaction)
       .input("idCentroCosto", sql.BigInt, idCentroCosto)
       .query(`
-        SELECT TOP 1 sap_codigo
-        FROM [cfl].[CFL_centro_costo]
-        WHERE id_centro_costo = @idCentroCosto;
+        SELECT TOP 1 SapCodigo
+        FROM [cfl].[CentroCosto]
+        WHERE IdCentroCosto = @idCentroCosto;
       `);
     const centroCostoCanonicoSug = toNullableTrimmedString(centroCostoCanonicalResult.recordset[0]?.sap_codigo);
 
@@ -1417,8 +1531,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         .input("idCuentaMayor", sql.BigInt, idCuentaMayor)
         .query(`
           SELECT TOP 1 codigo
-          FROM [cfl].[CFL_cuenta_mayor]
-          WHERE id_cuenta_mayor = @idCuentaMayor;
+          FROM [cfl].[CuentaMayor]
+          WHERE IdCuentaMayor = @idCuentaMayor;
         `);
       cuentaMayorCanonicaSug = toNullableTrimmedString(cuentaMayorCanonicalResult.recordset[0]?.codigo);
     }
@@ -1428,6 +1542,11 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const sapCuentaMayorSug = sapCuentaMayor || cuentaMayorCanonicaSug;
     // cuenta_mayor_final eliminado; la cuenta contable final se gestiona via id_cuenta_mayor (FK)
     const sapGuiaRemision = toNullableTrimmedString(entrega.sap_guia_remision);
+    const idProductorResolved = await resolveProductorIdByDestinatario(
+      transaction,
+      idProductor,
+      entrega.SapDestinatario
+    );
 
     const insertCabeceraReq = new sql.Request(transaction);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
@@ -1438,9 +1557,13 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), sapCuentaMayorSug ? sapCuentaMayorSug.slice(0, 10) : null);
     insertCabeceraReq.input("sapGuiaRemision", sql.Char(25), sapGuiaRemision ? sapGuiaRemision.slice(0, 25) : null);
     // guia_remision y numero_entrega se rellenan cuando el operador edita el flete; null en creación
-    insertCabeceraReq.input("guiaRemision", sql.Char(25), toNullableTrimmedString(cabeceraIn.guia_remision) ? toNullableTrimmedString(cabeceraIn.guia_remision).slice(0, 25) : null);
-    insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.numero_entrega) ? toNullableTrimmedString(cabeceraIn.numero_entrega).slice(0, 20) : null);
+    const guiaRemisionIn = toNullableTrimmedString(cabeceraIn.guia_remision);
+    const numeroEntregaIn = toNullableTrimmedString(cabeceraIn.numero_entrega);
+    insertCabeceraReq.input("guiaRemision", sql.Char(25), guiaRemisionIn ? guiaRemisionIn.slice(0, 25) : null);
+    insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), numeroEntregaIn ? numeroEntregaIn.slice(0, 20) : null);
+    insertCabeceraReq.input("idProductor", sql.BigInt, idProductorResolved);
     insertCabeceraReq.input("tipoMovimiento", sql.VarChar(4), tipoMovimiento);
+    insertCabeceraReq.input("sentidoFlete", sql.VarChar(20), sentidoFlete ? sentidoFlete.slice(0, 20) : null);
     insertCabeceraReq.input("estado", sql.VarChar(20), estado);
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraReq.input("horaSalida", sql.VarChar(8), horaSalida);
@@ -1455,31 +1578,33 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     insertCabeceraReq.input("idCentroCosto", sql.BigInt, idCentroCosto);
 
     const cabeceraResult = await insertCabeceraReq.query(`
-      INSERT INTO [cfl].[CFL_cabecera_flete] (
-        [id_detalle_viaje],
-        [id_folio],
-        [sap_numero_entrega],
-        [sap_codigo_tipo_flete],
-        [sap_centro_costo],
-        [sap_cuenta_mayor],
-        [sap_guia_remision],
-        [guia_remision],
-        [numero_entrega],
-        [tipo_movimiento],
-        [estado],
-        [fecha_salida],
-        [hora_salida],
-        [monto_aplicado],
-        [id_movil],
-        [id_tarifa],
-        [observaciones],
-        [id_usuario_creador],
-        [id_tipo_flete],
-        [created_at],
-        [updated_at],
-        [id_centro_costo]
+      INSERT INTO [cfl].[CabeceraFlete] (
+        [IdDetalleViaje],
+        [IdFolio],
+        [SapNumeroEntrega],
+        [SapCodigoTipoFlete],
+        [SapCentroCosto],
+        [SapCuentaMayor],
+        [SapGuiaRemision],
+        [GuiaRemision],
+        [NumeroEntrega],
+        [IdProductor],
+        [TipoMovimiento],
+        [SentidoFlete],
+        [Estado],
+        [FechaSalida],
+        [HoraSalida],
+        [MontoAplicado],
+        [IdMovil],
+        [IdTarifa],
+        [Observaciones],
+        [IdUsuarioCreador],
+        [IdTipoFlete],
+        [FechaCreacion],
+        [FechaActualizacion],
+        [IdCentroCosto]
       )
-      OUTPUT INSERTED.id_cabecera_flete
+      OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
         @idDetalleViaje,
         @idFolio,
@@ -1490,7 +1615,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         @sapGuiaRemision,
         @guiaRemision,
         @numeroEntrega,
+        @idProductor,
         @tipoMovimiento,
+        @sentidoFlete,
         @estado,
         @fechaSalida,
         CAST(@horaSalida AS TIME),
@@ -1506,7 +1633,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       );
     `);
 
-    const idCabeceraFlete = cabeceraResult.recordset[0].id_cabecera_flete;
+    const idCabeceraFlete = cabeceraResult.recordset[0].IdCabeceraFlete;
 
     await new sql.Request(transaction)
       .input("idCabeceraFlete", sql.BigInt, idCabeceraFlete)
@@ -1515,12 +1642,12 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       .input("tipoRelacion", sql.VarChar(20), "PRINCIPAL")
       .input("createdAt", sql.DateTime2(0), now)
       .query(`
-        INSERT INTO [cfl].[CFL_flete_sap_entrega] (
-          [id_cabecera_flete],
-          [id_sap_entrega],
-          [origen_datos],
-          [tipo_relacion],
-          [created_at]
+        INSERT INTO [cfl].[FleteSapEntrega] (
+          [IdCabeceraFlete],
+          [IdSapEntrega],
+          [OrigenDatos],
+          [TipoRelacion],
+          [FechaCreacion]
         )
         VALUES (
           @idCabeceraFlete,
@@ -1549,15 +1676,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         .input("peso", sql.Decimal(15, 3), Number.isFinite(peso) ? peso : null)
         .input("createdAt", sql.DateTime2(0), now)
         .query(`
-          INSERT INTO [cfl].[CFL_detalle_flete] (
-            [id_cabecera_flete],
-            [id_especie],
-            [material],
-            [descripcion],
-            [cantidad],
-            [unidad],
-            [peso],
-            [created_at]
+          INSERT INTO [cfl].[DetalleFlete] (
+            [IdCabeceraFlete],
+            [IdEspecie],
+            [Material],
+            [Descripcion],
+            [Cantidad],
+            [Unidad],
+            [Peso],
+            [FechaCreacion]
           )
           VALUES (
             @idCabeceraFlete,
@@ -1614,20 +1741,21 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
 
     const deliveryResult = await deliveryRequest.query(`
       SELECT TOP 1
-        e.id_sap_entrega,
-        e.sap_numero_entrega,
-        e.source_system,
-        lk.sap_codigo_tipo_flete,
-        lk.sap_centro_costo,
-        lk.sap_cuenta_mayor,
-        lk.sap_guia_remision,
-        CONVERT(VARCHAR(10), lk.sap_fecha_salida, 23) AS sap_fecha_salida_iso,
-        CONVERT(VARCHAR(8), lk.sap_hora_salida, 108) AS sap_hora_salida_iso
-      FROM [cfl].[CFL_sap_entrega] e
-      LEFT JOIN [cfl].[vw_cfl_sap_likp_current] lk
-        ON lk.sap_numero_entrega = e.sap_numero_entrega
-       AND lk.source_system = e.source_system
-      WHERE e.id_sap_entrega = @idSapEntrega;
+        e.IdSapEntrega,
+        e.SapNumeroEntrega,
+        e.SistemaFuente,
+        lk.SapCodigoTipoFlete,
+        lk.SapCentroCosto,
+        lk.SapCuentaMayor,
+        lk.SapGuiaRemision,
+        lk.SapDestinatario,
+        CONVERT(VARCHAR(10), lk.SapFechaSalida, 23) AS sap_fecha_salida_iso,
+        CONVERT(VARCHAR(8), lk.SapHoraSalida, 108) AS sap_hora_salida_iso
+      FROM [cfl].[SapEntrega] e
+      LEFT JOIN [cfl].[VW_LikpActual] lk
+        ON lk.SapNumeroEntrega = e.SapNumeroEntrega
+       AND lk.SistemaFuente = e.SistemaFuente
+      WHERE e.IdSapEntrega = @idSapEntrega;
     `);
 
     const delivery = deliveryResult.recordset[0];
@@ -1641,8 +1769,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
       .input("idSapEntrega", sql.BigInt, idSapEntrega)
       .query(`
         SELECT TOP 1 1 AS is_discarded
-        FROM [cfl].[CFL_sap_entrega_descarte]
-        WHERE id_sap_entrega = @idSapEntrega
+        FROM [cfl].[SapEntregaDescarte]
+        WHERE IdSapEntrega = @idSapEntrega
           AND activo = 1;
       `);
 
@@ -1658,8 +1786,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     existsRequest.input("idSapEntrega", sql.BigInt, idSapEntrega);
     const existsResult = await existsRequest.query(`
       SELECT TOP 1 1 AS already_linked
-      FROM [cfl].[CFL_flete_sap_entrega]
-      WHERE id_sap_entrega = @idSapEntrega;
+      FROM [cfl].[FleteSapEntrega]
+      WHERE IdSapEntrega = @idSapEntrega;
     `);
 
     if (existsResult.recordset.length > 0) {
@@ -1682,10 +1810,10 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     const tipoFleteRequest = new sql.Request(transaction);
     tipoFleteRequest.input("sapCodigo", sql.VarChar(20), sapTipoFlete);
     const tipoFleteResult = await tipoFleteRequest.query(`
-      SELECT TOP 1 id_tipo_flete, id_centro_costo
-      FROM [cfl].[CFL_tipo_flete]
-      WHERE sap_codigo = @sapCodigo
-      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_tipo_flete ASC;
+      SELECT TOP 1 IdTipoFlete, IdCentroCosto
+      FROM [cfl].[TipoFlete]
+      WHERE SapCodigo = @sapCodigo
+      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, IdTipoFlete ASC;
     `);
 
     const tipoFlete = tipoFleteResult.recordset[0];
@@ -1704,10 +1832,10 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
       const centroRequest = new sql.Request(transaction);
       centroRequest.input("sapCentroCosto", sql.VarChar(20), sapCentroCosto);
       const centroResult = await centroRequest.query(`
-        SELECT TOP 1 id_centro_costo
-        FROM [cfl].[CFL_centro_costo]
-        WHERE sap_codigo = @sapCentroCosto
-        ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_centro_costo ASC;
+        SELECT TOP 1 IdCentroCosto
+        FROM [cfl].[CentroCosto]
+        WHERE SapCodigo = @sapCentroCosto
+        ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, IdCentroCosto ASC;
       `);
 
       idCentroCosto = centroResult.recordset[0]?.id_centro_costo || null;
@@ -1732,12 +1860,19 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     const insertCabeceraRequest = new sql.Request(transaction);
     // cuenta_mayor_final eliminado; la cuenta contable final se gestiona via id_cuenta_mayor (FK)
     const sapGuiaRemisionIngresar = toNullableTrimmedString(delivery.sap_guia_remision);
+    const idProductorResolved = await resolveProductorIdByDestinatario(
+      transaction,
+      null,
+      delivery.SapDestinatario
+    );
     insertCabeceraRequest.input("sapNumeroEntrega", sql.VarChar(20), delivery.sap_numero_entrega);
     insertCabeceraRequest.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFlete.slice(0, 4));
     insertCabeceraRequest.input("sapCentroCosto", sql.Char(10), sapCentroCosto ? sapCentroCosto.slice(0, 10) : null);
     insertCabeceraRequest.input("sapCuentaMayor", sql.Char(10), sapCuentaMayor ? sapCuentaMayor.slice(0, 10) : null);
     insertCabeceraRequest.input("sapGuiaRemision", sql.Char(25), sapGuiaRemisionIngresar ? sapGuiaRemisionIngresar.slice(0, 25) : null);
+    insertCabeceraRequest.input("idProductor", sql.BigInt, idProductorResolved);
     insertCabeceraRequest.input("tipoMovimiento", sql.VarChar(4), "PUSH");
+    insertCabeceraRequest.input("sentidoFlete", sql.VarChar(20), null);
     insertCabeceraRequest.input("estado", sql.VarChar(20), LIFECYCLE_STATUS.EN_REVISION);
     insertCabeceraRequest.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraRequest.input("horaSalida", sql.VarChar(8), horaSalida);
@@ -1748,30 +1883,34 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     insertCabeceraRequest.input("idCentroCosto", sql.BigInt, idCentroCosto);
 
     const cabeceraResult = await insertCabeceraRequest.query(`
-      INSERT INTO [cfl].[CFL_cabecera_flete] (
-        [sap_numero_entrega],
-        [sap_codigo_tipo_flete],
-        [sap_centro_costo],
-        [sap_cuenta_mayor],
-        [sap_guia_remision],
-        [tipo_movimiento],
-        [estado],
-        [fecha_salida],
-        [hora_salida],
-        [monto_aplicado],
-        [id_tipo_flete],
-        [created_at],
-        [updated_at],
-        [id_centro_costo]
+      INSERT INTO [cfl].[CabeceraFlete] (
+        [SapNumeroEntrega],
+        [SapCodigoTipoFlete],
+        [SapCentroCosto],
+        [SapCuentaMayor],
+        [SapGuiaRemision],
+        [IdProductor],
+        [TipoMovimiento],
+        [SentidoFlete],
+        [Estado],
+        [FechaSalida],
+        [HoraSalida],
+        [MontoAplicado],
+        [IdTipoFlete],
+        [FechaCreacion],
+        [FechaActualizacion],
+        [IdCentroCosto]
       )
-      OUTPUT INSERTED.id_cabecera_flete
+      OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
         @sapNumeroEntrega,
         @sapCodigoTipoFlete,
         @sapCentroCosto,
         @sapCuentaMayor,
         @sapGuiaRemision,
+        @idProductor,
         @tipoMovimiento,
+        @sentidoFlete,
         @estado,
         @fechaSalida,
         CAST(@horaSalida AS TIME),
@@ -1797,14 +1936,14 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", async (req, res, n
     insertBridgeRequest.input("createdAt", sql.DateTime2(0), now);
 
     const bridgeResult = await insertBridgeRequest.query(`
-      INSERT INTO [cfl].[CFL_flete_sap_entrega] (
-        [id_cabecera_flete],
-        [id_sap_entrega],
-        [origen_datos],
-        [tipo_relacion],
-        [created_at]
+      INSERT INTO [cfl].[FleteSapEntrega] (
+        [IdCabeceraFlete],
+        [IdSapEntrega],
+        [OrigenDatos],
+        [TipoRelacion],
+        [FechaCreacion]
       )
-      OUTPUT INSERTED.id_flete_sap_entrega
+      OUTPUT INSERTED.IdFleteSapEntrega
       VALUES (
         @idCabeceraFlete,
         @idSapEntrega,

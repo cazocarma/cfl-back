@@ -304,14 +304,14 @@ async function insertAuditRow({ idUsuario, action, entity, entityId, summary, ip
     .input("resumen", sql.VarChar(300), trimTo(summary, MAX_SUMMARY_LENGTH))
     .input("ipEquipo", sql.VarChar(50), trimTo(ipAddress, MAX_IP_LENGTH))
     .query(`
-      INSERT INTO [cfl].[CFL_auditoria] (
-        [id_usuario],
-        [fecha_hora],
+      INSERT INTO [cfl].[Auditoria] (
+        [IdUsuario],
+        [FechaHora],
         [accion],
         [entidad],
-        [id_entidad],
+        [IdEntidad],
         [resumen],
-        [ip_equipo]
+        [IpEquipo]
       )
       VALUES (
         @idUsuario,

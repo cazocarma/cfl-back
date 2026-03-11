@@ -131,15 +131,15 @@ async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = nu
     .input("idChofer", sql.BigInt, idChofer)
     .input("idCamion", sql.BigInt, idCamion)
     .query(`
-      SELECT TOP 1 id_movil
-      FROM [cfl].[CFL_movil]
-      WHERE id_empresa_transporte = @idEmpresa
-        AND id_chofer = @idChofer
-        AND id_camion = @idCamion
-      ORDER BY CASE WHEN activo = 1 THEN 0 ELSE 1 END, id_movil ASC;
+      SELECT TOP 1 IdMovil
+      FROM [cfl].[Movil]
+      WHERE IdEmpresaTransporte = @idEmpresa
+        AND IdChofer = @idChofer
+        AND IdCamion = @idCamion
+      ORDER BY CASE WHEN Activo = 1 THEN 0 ELSE 1 END, IdMovil ASC;
     `);
 
-  const existingMovilId = lookup.recordset[0]?.id_movil || null;
+  const existingMovilId = lookup.recordset[0]?.IdMovil || null;
   if (existingMovilId) return Number(existingMovilId);
 
   const created = await new sql.Request(transaction)
@@ -150,15 +150,15 @@ async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = nu
     .input("createdAt", sql.DateTime2(0), now)
     .input("updatedAt", sql.DateTime2(0), now)
     .query(`
-      INSERT INTO [cfl].[CFL_movil] (
-        [id_chofer],
-        [id_empresa_transporte],
-        [id_camion],
-        [activo],
-        [created_at],
-        [updated_at]
+      INSERT INTO [cfl].[Movil] (
+        [IdChofer],
+        [IdEmpresaTransporte],
+        [IdCamion],
+        [Activo],
+        [FechaCreacion],
+        [FechaActualizacion]
       )
-      OUTPUT INSERTED.id_movil
+      OUTPUT INSERTED.IdMovil
       VALUES (
         @idChofer,
         @idEmpresa,
@@ -169,7 +169,7 @@ async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = nu
       );
     `);
 
-  return Number(created.recordset[0].id_movil);
+  return Number(created.recordset[0].IdMovil);
 }
 
 /**
@@ -183,15 +183,15 @@ async function resolveFolioForLifecycle(transaction, idFolio) {
   const result = await new sql.Request(transaction)
     .input("idFolio", sql.BigInt, parsed)
     .query(`
-      SELECT TOP 1 folio_numero
-      FROM [cfl].[CFL_folio]
-      WHERE id_folio = @idFolio;
+      SELECT TOP 1 FolioNumero
+      FROM [cfl].[Folio]
+      WHERE IdFolio = @idFolio;
     `);
 
   const row = result.recordset[0] || null;
   if (!row) return parsed;
 
-  const numero = String(row.folio_numero || "").trim();
+  const numero = String(row.FolioNumero || "").trim();
   return numero === "0" ? null : parsed;
 }
 

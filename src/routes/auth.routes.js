@@ -51,10 +51,10 @@ router.post("/login", async (req, res, next) => {
       .request()
       .input("email", email)
       .query(`
-        SELECT id_usuario, username, email, nombre, apellido, password_hash
-        FROM [cfl].[CFL_usuario]
-        WHERE email = @email
-          AND activo = 1;
+        SELECT IdUsuario, Username, Email, Nombre, Apellido, PasswordHash
+        FROM [cfl].[Usuario]
+        WHERE Email = @email
+          AND Activo = 1;
       `);
 
     const user = userResult.recordset[0] || null;
@@ -66,7 +66,7 @@ router.post("/login", async (req, res, next) => {
       return res.status(401).json({ error: INVALID_MSG });
     }
 
-    const passwordOk = await bcrypt.compare(password, user.password_hash);
+    const passwordOk = await bcrypt.compare(password, user.PasswordHash);
     if (!passwordOk) {
       return res.status(401).json({ error: INVALID_MSG });
     }
@@ -74,23 +74,23 @@ router.post("/login", async (req, res, next) => {
     // Obtener el rol principal del usuario
     const roleResult = await pool
       .request()
-      .input("userId", user.id_usuario)
+      .input("userId", user.IdUsuario)
       .query(`
-        SELECT TOP 1 r.nombre AS role_nombre
-        FROM [cfl].[CFL_usuario_rol] ur
-        INNER JOIN [cfl].[CFL_rol] r ON r.id_rol = ur.id_rol AND r.activo = 1
-        WHERE ur.id_usuario = @userId
-        ORDER BY r.nombre ASC;
+        SELECT TOP 1 r.Nombre AS role_nombre
+        FROM [cfl].[UsuarioRol] ur
+        INNER JOIN [cfl].[Rol] r ON r.IdRol = ur.IdRol AND r.Activo = 1
+        WHERE ur.IdUsuario = @userId
+        ORDER BY r.Nombre ASC;
       `);
 
     const primaryRole = roleResult.recordset[0]?.role_nombre || null;
 
     const payload = {
-      id_usuario: Number(user.id_usuario),
-      username: user.username,
-      email: user.email,
-      nombre: user.nombre || null,
-      apellido: user.apellido || null,
+      id_usuario: Number(user.IdUsuario),
+      username: user.Username,
+      email: user.Email,
+      nombre: user.Nombre || null,
+      apellido: user.Apellido || null,
       role: primaryRole,
     };
 

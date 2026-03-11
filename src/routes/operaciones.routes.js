@@ -55,194 +55,194 @@ router.get("/facturas/overview", async (req, res, next) => {
       SELECT
         facturas_registradas = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_cabecera_factura]
+          FROM [cfl].[CabeceraFactura]
         ),
         folios_con_factura = (
-          SELECT COUNT_BIG(DISTINCT id_folio)
-          FROM [cfl].[CFL_cabecera_factura]
+          SELECT COUNT_BIG(DISTINCT IdFolio)
+          FROM [cfl].[CabeceraFactura]
         ),
         folios_elegibles = (
           SELECT COUNT_BIG(1)
           FROM (
-            SELECT cf.id_folio
-            FROM [cfl].[CFL_cabecera_flete] cf
-            INNER JOIN [cfl].[CFL_folio] fol
-              ON fol.id_folio = cf.id_folio
+            SELECT cf.IdFolio
+            FROM [cfl].[CabeceraFlete] cf
+            INNER JOIN [cfl].[Folio] fol
+              ON fol.IdFolio = cf.IdFolio
             WHERE UPPER(cf.estado) = 'ASIGNADO_FOLIO'
-              AND cf.id_folio IS NOT NULL
-              AND ISNULL(LTRIM(RTRIM(CAST(fol.folio_numero AS NVARCHAR(50)))), '') <> '0'
-            GROUP BY cf.id_folio
+              AND cf.IdFolio IS NOT NULL
+              AND ISNULL(LTRIM(RTRIM(CAST(fol.FolioNumero AS NVARCHAR(50)))), '') <> '0'
+            GROUP BY cf.IdFolio
           ) eligible
         ),
         folios_pendientes_factura = (
           SELECT COUNT_BIG(1)
           FROM (
-            SELECT cf.id_folio
-            FROM [cfl].[CFL_cabecera_flete] cf
-            INNER JOIN [cfl].[CFL_folio] fol
-              ON fol.id_folio = cf.id_folio
-            LEFT JOIN [cfl].[CFL_cabecera_factura] fac
-              ON fac.id_folio = cf.id_folio
+            SELECT cf.IdFolio
+            FROM [cfl].[CabeceraFlete] cf
+            INNER JOIN [cfl].[Folio] fol
+              ON fol.IdFolio = cf.IdFolio
+            LEFT JOIN [cfl].[CabeceraFactura] fac
+              ON fac.IdFolio = cf.IdFolio
             WHERE UPPER(cf.estado) = 'ASIGNADO_FOLIO'
-              AND cf.id_folio IS NOT NULL
-              AND fac.id_factura IS NULL
-              AND ISNULL(LTRIM(RTRIM(CAST(fol.folio_numero AS NVARCHAR(50)))), '') <> '0'
-            GROUP BY cf.id_folio
+              AND cf.IdFolio IS NOT NULL
+              AND fac.IdFactura IS NULL
+              AND ISNULL(LTRIM(RTRIM(CAST(fol.FolioNumero AS NVARCHAR(50)))), '') <> '0'
+            GROUP BY cf.IdFolio
           ) pending
         ),
         monto_facturado = (
-          SELECT COALESCE(SUM(monto_total), 0)
-          FROM [cfl].[CFL_cabecera_factura]
+          SELECT COALESCE(SUM(MontoTotal), 0)
+          FROM [cfl].[CabeceraFactura]
         ),
         monto_pendiente_estimado = (
-          SELECT COALESCE(SUM(pending.monto_neto), 0)
+          SELECT COALESCE(SUM(pending.MontoNeto), 0)
           FROM (
             SELECT
-              cf.id_folio,
-              SUM(COALESCE(cf.monto_aplicado, 0)) AS monto_neto
-            FROM [cfl].[CFL_cabecera_flete] cf
-            INNER JOIN [cfl].[CFL_folio] fol
-              ON fol.id_folio = cf.id_folio
-            LEFT JOIN [cfl].[CFL_cabecera_factura] fac
-              ON fac.id_folio = cf.id_folio
+              cf.IdFolio,
+              SUM(COALESCE(cf.MontoAplicado, 0)) AS MontoNeto
+            FROM [cfl].[CabeceraFlete] cf
+            INNER JOIN [cfl].[Folio] fol
+              ON fol.IdFolio = cf.IdFolio
+            LEFT JOIN [cfl].[CabeceraFactura] fac
+              ON fac.IdFolio = cf.IdFolio
             WHERE UPPER(cf.estado) = 'ASIGNADO_FOLIO'
-              AND cf.id_folio IS NOT NULL
-              AND fac.id_factura IS NULL
-              AND ISNULL(LTRIM(RTRIM(CAST(fol.folio_numero AS NVARCHAR(50)))), '') <> '0'
-            GROUP BY cf.id_folio
+              AND cf.IdFolio IS NOT NULL
+              AND fac.IdFactura IS NULL
+              AND ISNULL(LTRIM(RTRIM(CAST(fol.FolioNumero AS NVARCHAR(50)))), '') <> '0'
+            GROUP BY cf.IdFolio
           ) pending
         );
     `);
 
     const facturasResult = await pool.request().query(`
       SELECT TOP 100
-        fac.id_factura,
-        fac.id_folio,
-        fol.folio_numero,
-        fac.id_empresa,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), CONCAT('Empresa #', fac.id_empresa)),
-        fac.numero_factura,
-        fac.fecha_emision,
+        fac.IdFactura,
+        fac.IdFolio,
+        fol.FolioNumero,
+        fac.IdEmpresa,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
+        fac.NumeroFactura,
+        fac.FechaEmision,
         fac.moneda,
-        fac.monto_neto,
-        fac.monto_iva,
-        fac.monto_total,
+        fac.MontoNeto,
+        fac.MontoIva,
+        fac.MontoTotal,
         fac.estado,
-        fac.ruta_xml,
-        fac.ruta_pdf,
-        fac.created_at,
-        fac.updated_at,
-        fol.periodo_desde,
-        fol.periodo_hasta,
-        cc.id_centro_costo,
+        fac.RutaXml,
+        fac.RutaPdf,
+        fac.FechaCreacion,
+        fac.FechaActualizacion,
+        fol.PeriodoDesde,
+        fol.PeriodoHasta,
+        cc.IdCentroCosto,
         centro_costo = cc.nombre,
-        centro_costo_codigo = cc.sap_codigo,
+        centro_costo_codigo = cc.SapCodigo,
         total_detalles = ISNULL(det.total_detalles, 0),
         total_movimientos = ISNULL(mov.total_movimientos, 0),
         movimientos_conciliados = ISNULL(con.total_conciliados, 0)
-      FROM [cfl].[CFL_cabecera_factura] fac
-      INNER JOIN [cfl].[CFL_folio] fol
-        ON fol.id_folio = fac.id_folio
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp
-        ON emp.id_empresa = fac.id_empresa
-      LEFT JOIN [cfl].[CFL_centro_costo] cc
-        ON cc.id_centro_costo = fol.id_centro_costo
+      FROM [cfl].[CabeceraFactura] fac
+      INNER JOIN [cfl].[Folio] fol
+        ON fol.IdFolio = fac.IdFolio
+      LEFT JOIN [cfl].[EmpresaTransporte] emp
+        ON emp.IdEmpresa = fac.IdEmpresa
+      LEFT JOIN [cfl].[CentroCosto] cc
+        ON cc.IdCentroCosto = fol.IdCentroCosto
       OUTER APPLY (
         SELECT COUNT_BIG(1) AS total_detalles
-        FROM [cfl].[CFL_detalle_factura] df
-        WHERE df.id_factura = fac.id_factura
+        FROM [cfl].[DetalleFactura] df
+        WHERE df.IdFactura = fac.IdFactura
       ) det
       OUTER APPLY (
         SELECT COUNT_BIG(1) AS total_movimientos
-        FROM [cfl].[CFL_cabecera_flete] cf
-        WHERE cf.id_folio = fac.id_folio
+        FROM [cfl].[CabeceraFlete] cf
+        WHERE cf.IdFolio = fac.IdFolio
       ) mov
       OUTER APPLY (
         SELECT COUNT_BIG(1) AS total_conciliados
-        FROM [cfl].[CFL_conciliacion_factura_flete] cff
-        WHERE cff.id_factura = fac.id_factura
+        FROM [cfl].[ConciliacionFacturaFlete] cff
+        WHERE cff.IdFactura = fac.IdFactura
       ) con
-      ORDER BY fac.fecha_emision DESC, fac.id_factura DESC;
+      ORDER BY fac.FechaEmision DESC, fac.IdFactura DESC;
     `);
 
     const eligibleFoliosResult = await pool.request().query(`
       WITH movimientos AS (
         SELECT
-          cf.id_folio,
-          cf.id_cabecera_flete,
-          cf.fecha_salida,
-          cf.monto_aplicado,
-          mv.id_empresa_transporte,
-          emp.razon_social AS empresa_nombre
-        FROM [cfl].[CFL_cabecera_flete] cf
-        INNER JOIN [cfl].[CFL_folio] fol
-          ON fol.id_folio = cf.id_folio
-        LEFT JOIN [cfl].[CFL_movil] mv
-          ON mv.id_movil = cf.id_movil
-        LEFT JOIN [cfl].[CFL_empresa_transporte] emp
-          ON emp.id_empresa = mv.id_empresa_transporte
+          cf.IdFolio,
+          cf.IdCabeceraFlete,
+          cf.FechaSalida,
+          cf.MontoAplicado,
+          mv.IdEmpresaTransporte,
+          emp.RazonSocial AS empresa_nombre
+        FROM [cfl].[CabeceraFlete] cf
+        INNER JOIN [cfl].[Folio] fol
+          ON fol.IdFolio = cf.IdFolio
+        LEFT JOIN [cfl].[Movil] mv
+          ON mv.IdMovil = cf.IdMovil
+        LEFT JOIN [cfl].[EmpresaTransporte] emp
+          ON emp.IdEmpresa = mv.IdEmpresaTransporte
         WHERE UPPER(cf.estado) = 'ASIGNADO_FOLIO'
-          AND cf.id_folio IS NOT NULL
-          AND ISNULL(LTRIM(RTRIM(CAST(fol.folio_numero AS NVARCHAR(50)))), '') <> '0'
+          AND cf.IdFolio IS NOT NULL
+          AND ISNULL(LTRIM(RTRIM(CAST(fol.FolioNumero AS NVARCHAR(50)))), '') <> '0'
       ),
       empresa_top AS (
         SELECT
-          m.id_folio,
-          m.id_empresa_transporte,
-          empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(m.empresa_nombre)), ''), CONCAT('Empresa #', m.id_empresa_transporte)),
+          m.IdFolio,
+          m.IdEmpresaTransporte,
+          empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(m.empresa_nombre)), ''), CONCAT('Empresa #', m.IdEmpresaTransporte)),
           rn = ROW_NUMBER() OVER (
-            PARTITION BY m.id_folio
-            ORDER BY COUNT_BIG(1) DESC, m.id_empresa_transporte ASC
+            PARTITION BY m.IdFolio
+            ORDER BY COUNT_BIG(1) DESC, m.IdEmpresaTransporte ASC
           )
         FROM movimientos m
-        WHERE m.id_empresa_transporte IS NOT NULL
-        GROUP BY m.id_folio, m.id_empresa_transporte, m.empresa_nombre
+        WHERE m.IdEmpresaTransporte IS NOT NULL
+        GROUP BY m.IdFolio, m.IdEmpresaTransporte, m.empresa_nombre
       )
       SELECT
-        m.id_folio,
-        fol.folio_numero,
+        m.IdFolio,
+        fol.FolioNumero,
         estado_folio = fol.estado,
-        fol.periodo_desde,
-        fol.periodo_hasta,
+        fol.PeriodoDesde,
+        fol.PeriodoHasta,
         fol.bloqueado,
-        fol.id_centro_costo,
+        fol.IdCentroCosto,
         centro_costo = cc.nombre,
-        centro_costo_codigo = cc.sap_codigo,
+        centro_costo_codigo = cc.SapCodigo,
         total_movimientos = COUNT_BIG(1),
-        monto_neto_estimado = SUM(COALESCE(m.monto_aplicado, 0)),
-        fecha_primer_movimiento = MIN(m.fecha_salida),
-        fecha_ultimo_movimiento = MAX(m.fecha_salida),
-        empresa.id_empresa_transporte AS id_empresa,
+        monto_neto_estimado = SUM(COALESCE(m.MontoAplicado, 0)),
+        fecha_primer_movimiento = MIN(m.FechaSalida),
+        fecha_ultimo_movimiento = MAX(m.FechaSalida),
+        empresa.IdEmpresaTransporte AS IdEmpresa,
         empresa.empresa_nombre,
-        fac.id_factura AS id_factura_existente,
-        fac.numero_factura AS numero_factura_existente,
+        fac.IdFactura AS id_factura_existente,
+        fac.NumeroFactura AS numero_factura_existente,
         fac.estado AS estado_factura_existente
       FROM movimientos m
-      INNER JOIN [cfl].[CFL_folio] fol
-        ON fol.id_folio = m.id_folio
-      LEFT JOIN [cfl].[CFL_centro_costo] cc
-        ON cc.id_centro_costo = fol.id_centro_costo
+      INNER JOIN [cfl].[Folio] fol
+        ON fol.IdFolio = m.IdFolio
+      LEFT JOIN [cfl].[CentroCosto] cc
+        ON cc.IdCentroCosto = fol.IdCentroCosto
       LEFT JOIN empresa_top empresa
-        ON empresa.id_folio = m.id_folio
+        ON empresa.IdFolio = m.IdFolio
        AND empresa.rn = 1
-      LEFT JOIN [cfl].[CFL_cabecera_factura] fac
-        ON fac.id_folio = m.id_folio
+      LEFT JOIN [cfl].[CabeceraFactura] fac
+        ON fac.IdFolio = m.IdFolio
       GROUP BY
-        m.id_folio,
-        fol.folio_numero,
+        m.IdFolio,
+        fol.FolioNumero,
         fol.estado,
-        fol.periodo_desde,
-        fol.periodo_hasta,
+        fol.PeriodoDesde,
+        fol.PeriodoHasta,
         fol.bloqueado,
-        fol.id_centro_costo,
+        fol.IdCentroCosto,
         cc.nombre,
-        cc.sap_codigo,
-        empresa.id_empresa_transporte,
+        cc.SapCodigo,
+        empresa.IdEmpresaTransporte,
         empresa.empresa_nombre,
-        fac.id_factura,
-        fac.numero_factura,
+        fac.IdFactura,
+        fac.NumeroFactura,
         fac.estado
-      ORDER BY MAX(m.fecha_salida) DESC, m.id_folio DESC;
+      ORDER BY MAX(m.FechaSalida) DESC, m.IdFolio DESC;
     `);
 
     res.json({
@@ -272,21 +272,21 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
 
     const folioResult = await pool.request().input("idFolio", idFolio).query(`
       SELECT TOP 1
-        fol.id_folio,
-        fol.folio_numero,
+        fol.IdFolio,
+        fol.FolioNumero,
         fol.estado,
         fol.bloqueado,
-        fol.periodo_desde,
-        fol.periodo_hasta,
-        fol.id_centro_costo,
+        fol.PeriodoDesde,
+        fol.PeriodoHasta,
+        fol.IdCentroCosto,
         centro_costo = cc.nombre,
-        centro_costo_codigo = cc.sap_codigo,
-        fol.created_at,
-        fol.updated_at
-      FROM [cfl].[CFL_folio] fol
-      LEFT JOIN [cfl].[CFL_centro_costo] cc
-        ON cc.id_centro_costo = fol.id_centro_costo
-      WHERE fol.id_folio = @idFolio;
+        centro_costo_codigo = cc.SapCodigo,
+        fol.FechaCreacion,
+        fol.FechaActualizacion
+      FROM [cfl].[Folio] fol
+      LEFT JOIN [cfl].[CentroCosto] cc
+        ON cc.IdCentroCosto = fol.IdCentroCosto
+      WHERE fol.IdFolio = @idFolio;
     `);
 
     const folio = folioResult.recordset[0] || null;
@@ -297,39 +297,39 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
 
     const facturaResult = await pool.request().input("idFolio", idFolio).query(`
       SELECT TOP 1
-        fac.id_factura,
-        fac.id_folio,
-        fac.id_empresa,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), CONCAT('Empresa #', fac.id_empresa)),
-        fac.numero_factura,
-        fac.fecha_emision,
+        fac.IdFactura,
+        fac.IdFolio,
+        fac.IdEmpresa,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
+        fac.NumeroFactura,
+        fac.FechaEmision,
         fac.moneda,
-        fac.monto_neto,
-        fac.monto_iva,
-        fac.monto_total,
+        fac.MontoNeto,
+        fac.MontoIva,
+        fac.MontoTotal,
         fac.estado,
-        fac.ruta_xml,
-        fac.ruta_pdf,
-        fac.created_at,
-        fac.updated_at
-      FROM [cfl].[CFL_cabecera_factura] fac
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp
-        ON emp.id_empresa = fac.id_empresa
-      WHERE fac.id_folio = @idFolio
-      ORDER BY fac.fecha_emision DESC, fac.id_factura DESC;
+        fac.RutaXml,
+        fac.RutaPdf,
+        fac.FechaCreacion,
+        fac.FechaActualizacion
+      FROM [cfl].[CabeceraFactura] fac
+      LEFT JOIN [cfl].[EmpresaTransporte] emp
+        ON emp.IdEmpresa = fac.IdEmpresa
+      WHERE fac.IdFolio = @idFolio
+      ORDER BY fac.FechaEmision DESC, fac.IdFactura DESC;
     `);
 
     const movimientosResult = await pool.request().input("idFolio", idFolio).query(`
       SELECT
-        cf.id_cabecera_flete,
-        cf.numero_entrega,
-        cf.sap_numero_entrega,
-        cf.fecha_salida,
-        cf.monto_aplicado,
+        cf.IdCabeceraFlete,
+        cf.NumeroEntrega,
+        cf.SapNumeroEntrega,
+        cf.FechaSalida,
+        cf.MontoAplicado,
         cf.estado,
-        cf.tipo_movimiento,
+        cf.TipoMovimiento,
         ruta = COALESCE(
-          r.nombre_ruta,
+          r.NombreRuta,
           CASE
             WHEN no.nombre IS NOT NULL OR nd.nombre IS NOT NULL
               THEN CONCAT(COALESCE(no.nombre, 'Origen'), ' -> ', COALESCE(nd.nombre, 'Destino'))
@@ -337,27 +337,27 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
           END
         ),
         transportista = COALESCE(
-          NULLIF(LTRIM(RTRIM(emp.razon_social)), ''),
+          NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''),
           'Transportista sin definir'
         ),
-        conciliado = CASE WHEN cff.id_conciliacion IS NULL THEN 0 ELSE 1 END
-      FROM [cfl].[CFL_cabecera_flete] cf
-      LEFT JOIN [cfl].[CFL_tarifa] tf
-        ON tf.id_tarifa = cf.id_tarifa
-      LEFT JOIN [cfl].[CFL_ruta] r
-        ON r.id_ruta = tf.id_ruta
-      LEFT JOIN [cfl].[CFL_nodo_logistico] no
-        ON no.id_nodo = r.id_origen_nodo
-      LEFT JOIN [cfl].[CFL_nodo_logistico] nd
-        ON nd.id_nodo = r.id_destino_nodo
-      LEFT JOIN [cfl].[CFL_movil] mv
-        ON mv.id_movil = cf.id_movil
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp
-        ON emp.id_empresa = mv.id_empresa_transporte
-      LEFT JOIN [cfl].[CFL_conciliacion_factura_flete] cff
-        ON cff.id_cabecera_flete = cf.id_cabecera_flete
-      WHERE cf.id_folio = @idFolio
-      ORDER BY cf.fecha_salida ASC, cf.id_cabecera_flete ASC;
+        conciliado = CASE WHEN cff.IdConciliacion IS NULL THEN 0 ELSE 1 END
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[Tarifa] tf
+        ON tf.IdTarifa = cf.IdTarifa
+      LEFT JOIN [cfl].[Ruta] r
+        ON r.IdRuta = tf.IdRuta
+      LEFT JOIN [cfl].[NodoLogistico] no
+        ON no.IdNodo = r.IdOrigenNodo
+      LEFT JOIN [cfl].[NodoLogistico] nd
+        ON nd.IdNodo = r.IdDestinoNodo
+      LEFT JOIN [cfl].[Movil] mv
+        ON mv.IdMovil = cf.IdMovil
+      LEFT JOIN [cfl].[EmpresaTransporte] emp
+        ON emp.IdEmpresa = mv.IdEmpresaTransporte
+      LEFT JOIN [cfl].[ConciliacionFacturaFlete] cff
+        ON cff.IdCabeceraFlete = cf.IdCabeceraFlete
+      WHERE cf.IdFolio = @idFolio
+      ORDER BY cf.FechaSalida ASC, cf.IdCabeceraFlete ASC;
     `);
 
     const existingFactura = facturaResult.recordset[0] || null;
@@ -368,12 +368,12 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
         .input("idFactura", Number(existingFactura.id_factura))
         .query(`
           SELECT
-            id_factura_detalle,
-            monto_linea,
+            IdFacturaDetalle,
+            MontoLinea,
             detalle
-          FROM [cfl].[CFL_detalle_factura]
-          WHERE id_factura = @idFactura
-          ORDER BY id_factura_detalle ASC;
+          FROM [cfl].[DetalleFactura]
+          WHERE IdFactura = @idFactura
+          ORDER BY IdFacturaDetalle ASC;
         `);
 
       res.json({
@@ -475,31 +475,31 @@ router.get("/planillas-sap/overview", async (req, res, next) => {
 
     const invoicesResult = await pool.request().query(`
       SELECT
-        fac.id_factura,
-        fac.id_folio,
-        fol.folio_numero,
-        fac.numero_factura,
-        fac.fecha_emision,
+        fac.IdFactura,
+        fac.IdFolio,
+        fol.FolioNumero,
+        fac.NumeroFactura,
+        fac.FechaEmision,
         fac.estado,
         fac.moneda,
-        fac.monto_neto,
-        fac.monto_iva,
-        fac.monto_total,
-        fac.id_empresa,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), CONCAT('Empresa #', fac.id_empresa)),
-        fol.periodo_desde,
-        fol.periodo_hasta,
-        fol.id_centro_costo,
+        fac.MontoNeto,
+        fac.MontoIva,
+        fac.MontoTotal,
+        fac.IdEmpresa,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
+        fol.PeriodoDesde,
+        fol.PeriodoHasta,
+        fol.IdCentroCosto,
         centro_costo = cc.nombre,
-        centro_costo_codigo = cc.sap_codigo
-      FROM [cfl].[CFL_cabecera_factura] fac
-      INNER JOIN [cfl].[CFL_folio] fol
-        ON fol.id_folio = fac.id_folio
-      LEFT JOIN [cfl].[CFL_centro_costo] cc
-        ON cc.id_centro_costo = fol.id_centro_costo
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp
-        ON emp.id_empresa = fac.id_empresa
-      ORDER BY fac.fecha_emision DESC, fac.id_factura DESC;
+        centro_costo_codigo = cc.SapCodigo
+      FROM [cfl].[CabeceraFactura] fac
+      INNER JOIN [cfl].[Folio] fol
+        ON fol.IdFolio = fac.IdFolio
+      LEFT JOIN [cfl].[CentroCosto] cc
+        ON cc.IdCentroCosto = fol.IdCentroCosto
+      LEFT JOIN [cfl].[EmpresaTransporte] emp
+        ON emp.IdEmpresa = fac.IdEmpresa
+      ORDER BY fac.FechaEmision DESC, fac.IdFactura DESC;
     `);
 
     const groups = new Map();
@@ -581,38 +581,38 @@ router.get("/estadisticas/overview", async (req, res, next) => {
 
     const summaryResult = await pool.request().query(`
       SELECT
-        total_fletes = (SELECT COUNT_BIG(1) FROM [cfl].[CFL_cabecera_flete]),
+        total_fletes = (SELECT COUNT_BIG(1) FROM [cfl].[CabeceraFlete]),
         fletes_en_revision = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_cabecera_flete]
+          FROM [cfl].[CabeceraFlete]
           WHERE UPPER(estado) = 'EN_REVISION'
         ),
         fletes_asignado_folio = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_cabecera_flete]
+          FROM [cfl].[CabeceraFlete]
           WHERE UPPER(estado) = 'ASIGNADO_FOLIO'
         ),
         fletes_facturados = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_cabecera_flete]
+          FROM [cfl].[CabeceraFlete]
           WHERE UPPER(estado) = 'FACTURADO'
         ),
         folios_abiertos = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_folio]
+          FROM [cfl].[Folio]
           WHERE UPPER(estado) = 'ABIERTO'
         ),
         facturas_registradas = (
           SELECT COUNT_BIG(1)
-          FROM [cfl].[CFL_cabecera_factura]
+          FROM [cfl].[CabeceraFactura]
         ),
         monto_facturado = (
-          SELECT COALESCE(SUM(monto_total), 0)
-          FROM [cfl].[CFL_cabecera_factura]
+          SELECT COALESCE(SUM(MontoTotal), 0)
+          FROM [cfl].[CabeceraFactura]
         ),
         ticket_promedio_factura = (
-          SELECT COALESCE(AVG(CAST(monto_total AS DECIMAL(18, 2))), 0)
-          FROM [cfl].[CFL_cabecera_factura]
+          SELECT COALESCE(AVG(CAST(MontoTotal AS DECIMAL(18, 2))), 0)
+          FROM [cfl].[CabeceraFactura]
         );
     `);
 
@@ -620,57 +620,57 @@ router.get("/estadisticas/overview", async (req, res, next) => {
       SELECT
         estado = UPPER(estado),
         total = COUNT_BIG(1),
-        monto = COALESCE(SUM(COALESCE(monto_aplicado, 0)), 0)
-      FROM [cfl].[CFL_cabecera_flete]
+        monto = COALESCE(SUM(COALESCE(MontoAplicado, 0)), 0)
+      FROM [cfl].[CabeceraFlete]
       GROUP BY UPPER(estado)
       ORDER BY COUNT_BIG(1) DESC, estado ASC;
     `);
 
     const transportistasResult = await pool.request().query(`
       SELECT TOP 6
-        emp.id_empresa,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.razon_social)), ''), 'Sin transportista'),
+        emp.IdEmpresa,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), 'Sin transportista'),
         total_movimientos = COUNT_BIG(1),
-        monto_total = COALESCE(SUM(COALESCE(cf.monto_aplicado, 0)), 0)
-      FROM [cfl].[CFL_cabecera_flete] cf
-      LEFT JOIN [cfl].[CFL_movil] mv
-        ON mv.id_movil = cf.id_movil
-      LEFT JOIN [cfl].[CFL_empresa_transporte] emp
-        ON emp.id_empresa = mv.id_empresa_transporte
-      GROUP BY emp.id_empresa, emp.razon_social
-      ORDER BY COALESCE(SUM(COALESCE(cf.monto_aplicado, 0)), 0) DESC, COUNT_BIG(1) DESC;
+        MontoTotal = COALESCE(SUM(COALESCE(cf.MontoAplicado, 0)), 0)
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[Movil] mv
+        ON mv.IdMovil = cf.IdMovil
+      LEFT JOIN [cfl].[EmpresaTransporte] emp
+        ON emp.IdEmpresa = mv.IdEmpresaTransporte
+      GROUP BY emp.IdEmpresa, emp.RazonSocial
+      ORDER BY COALESCE(SUM(COALESCE(cf.MontoAplicado, 0)), 0) DESC, COUNT_BIG(1) DESC;
     `);
 
     const centrosResult = await pool.request().query(`
       SELECT TOP 6
-        cc.id_centro_costo,
-        cc.sap_codigo,
+        cc.IdCentroCosto,
+        cc.SapCodigo,
         cc.nombre,
         total_movimientos = COUNT_BIG(1),
-        monto_total = COALESCE(SUM(COALESCE(cf.monto_aplicado, 0)), 0)
-      FROM [cfl].[CFL_cabecera_flete] cf
-      LEFT JOIN [cfl].[CFL_centro_costo] cc
-        ON cc.id_centro_costo = cf.id_centro_costo
-      GROUP BY cc.id_centro_costo, cc.sap_codigo, cc.nombre
-      ORDER BY COALESCE(SUM(COALESCE(cf.monto_aplicado, 0)), 0) DESC, COUNT_BIG(1) DESC;
+        MontoTotal = COALESCE(SUM(COALESCE(cf.MontoAplicado, 0)), 0)
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[CentroCosto] cc
+        ON cc.IdCentroCosto = cf.IdCentroCosto
+      GROUP BY cc.IdCentroCosto, cc.SapCodigo, cc.nombre
+      ORDER BY COALESCE(SUM(COALESCE(cf.MontoAplicado, 0)), 0) DESC, COUNT_BIG(1) DESC;
     `);
 
     const timelineResult = await pool.request().query(`
       WITH movimientos AS (
         SELECT
-          periodo = CONVERT(CHAR(7), created_at, 120),
+          periodo = CONVERT(CHAR(7), FechaCreacion, 120),
           total_fletes = COUNT_BIG(1),
-          monto_movimientos = COALESCE(SUM(COALESCE(monto_aplicado, 0)), 0)
-        FROM [cfl].[CFL_cabecera_flete]
-        GROUP BY CONVERT(CHAR(7), created_at, 120)
+          monto_movimientos = COALESCE(SUM(COALESCE(MontoAplicado, 0)), 0)
+        FROM [cfl].[CabeceraFlete]
+        GROUP BY CONVERT(CHAR(7), FechaCreacion, 120)
       ),
       facturas AS (
         SELECT
-          periodo = CONVERT(CHAR(7), fecha_emision, 120),
+          periodo = CONVERT(CHAR(7), FechaEmision, 120),
           total_facturas = COUNT_BIG(1),
-          monto_facturado = COALESCE(SUM(COALESCE(monto_total, 0)), 0)
-        FROM [cfl].[CFL_cabecera_factura]
-        GROUP BY CONVERT(CHAR(7), fecha_emision, 120)
+          monto_facturado = COALESCE(SUM(COALESCE(MontoTotal, 0)), 0)
+        FROM [cfl].[CabeceraFactura]
+        GROUP BY CONVERT(CHAR(7), FechaEmision, 120)
       )
       SELECT TOP 6
         periodo = COALESCE(m.periodo, f.periodo),
@@ -710,22 +710,22 @@ router.get("/auditoria/overview", async (req, res, next) => {
         total_registros = COUNT_BIG(1),
         registros_hoy = SUM(
           CASE
-            WHEN CAST(fecha_hora AS DATE) = CAST(SYSDATETIME() AS DATE) THEN 1
+            WHEN CAST(FechaHora AS DATE) = CAST(SYSDATETIME() AS DATE) THEN 1
             ELSE 0
           END
         ),
         usuarios_7d = COUNT(DISTINCT CASE
-          WHEN fecha_hora >= DATEADD(DAY, -7, SYSDATETIME()) THEN id_usuario
+          WHEN FechaHora >= DATEADD(DAY, -7, SYSDATETIME()) THEN IdUsuario
           ELSE NULL
         END)
-      FROM [cfl].[CFL_auditoria];
+      FROM [cfl].[Auditoria];
     `);
 
     const entidadesResult = await pool.request().query(`
       SELECT TOP 8
         entidad,
         total = COUNT_BIG(1)
-      FROM [cfl].[CFL_auditoria]
+      FROM [cfl].[Auditoria]
       GROUP BY entidad
       ORDER BY COUNT_BIG(1) DESC, entidad ASC;
     `);
@@ -734,30 +734,30 @@ router.get("/auditoria/overview", async (req, res, next) => {
       SELECT TOP 8
         accion,
         total = COUNT_BIG(1)
-      FROM [cfl].[CFL_auditoria]
+      FROM [cfl].[Auditoria]
       GROUP BY accion
       ORDER BY COUNT_BIG(1) DESC, accion ASC;
     `);
 
     const rowsResult = await pool.request().input("limit", limit).query(`
       SELECT TOP (@limit)
-        aud.id_auditoria,
-        aud.id_usuario,
+        aud.IdAuditoria,
+        aud.IdUsuario,
         usuario = COALESCE(
           NULLIF(LTRIM(RTRIM(CONCAT(COALESCE(u.nombre, ''), ' ', COALESCE(u.apellido, '')))), ''),
-          NULLIF(LTRIM(RTRIM(u.username)), ''),
-          CONCAT('Usuario #', aud.id_usuario)
+          NULLIF(LTRIM(RTRIM(u.Username)), ''),
+          CONCAT('Usuario #', aud.IdUsuario)
         ),
-        aud.fecha_hora,
+        aud.FechaHora,
         aud.accion,
         aud.entidad,
-        aud.id_entidad,
+        aud.IdEntidad,
         aud.resumen,
-        aud.ip_equipo
-      FROM [cfl].[CFL_auditoria] aud
-      LEFT JOIN [cfl].[CFL_usuario] u
-        ON u.id_usuario = aud.id_usuario
-      ORDER BY aud.fecha_hora DESC, aud.id_auditoria DESC;
+        aud.IpEquipo
+      FROM [cfl].[Auditoria] aud
+      LEFT JOIN [cfl].[Usuario] u
+        ON u.IdUsuario = aud.IdUsuario
+      ORDER BY aud.FechaHora DESC, aud.IdAuditoria DESC;
     `);
 
     res.json({

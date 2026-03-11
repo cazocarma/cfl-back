@@ -73,16 +73,16 @@ async function fetchAuthByRoleName(roleName) {
   const pool = await getPool();
   const query = `
     SELECT
-      r.nombre AS role_nombre,
-      p.clave AS permiso_clave
-    FROM [cfl].[CFL_rol] r
-    LEFT JOIN [cfl].[CFL_rol_permiso] rp
-      ON rp.id_rol = r.id_rol
-    LEFT JOIN [cfl].[CFL_permiso] p
-      ON p.id_permiso = rp.id_permiso
-     AND p.activo = 1
-    WHERE r.activo = 1
-      AND LOWER(r.nombre) = LOWER(@roleName);
+      r.Nombre AS role_nombre,
+      p.Clave AS permiso_clave
+    FROM [cfl].[Rol] r
+    LEFT JOIN [cfl].[RolPermiso] rp
+      ON rp.IdRol = r.IdRol
+    LEFT JOIN [cfl].[Permiso] p
+      ON p.IdPermiso = rp.IdPermiso
+     AND p.Activo = 1
+    WHERE r.Activo = 1
+      AND LOWER(r.Nombre) = LOWER(@roleName);
   `;
 
   const result = await pool.request().input("roleName", normalizedRole).query(query);
@@ -102,22 +102,22 @@ async function fetchAuthByUserId(userId) {
   const pool = await getPool();
   const query = `
     SELECT
-      r.nombre AS role_nombre,
-      p.clave AS permiso_clave
-    FROM [cfl].[CFL_usuario] u
-    INNER JOIN [cfl].[CFL_usuario_rol] ur
-      ON ur.id_usuario = u.id_usuario
-    INNER JOIN [cfl].[CFL_rol] r
-      ON r.id_rol = ur.id_rol
-     AND r.activo = 1
-    LEFT JOIN [cfl].[CFL_rol_permiso] rp
-      ON rp.id_rol = r.id_rol
-    LEFT JOIN [cfl].[CFL_permiso] p
-      ON p.id_permiso = rp.id_permiso
-     AND p.activo = 1
-    WHERE u.id_usuario = @userId
-      AND u.activo = 1
-    ORDER BY r.nombre ASC;
+      r.Nombre AS role_nombre,
+      p.Clave AS permiso_clave
+    FROM [cfl].[Usuario] u
+    INNER JOIN [cfl].[UsuarioRol] ur
+      ON ur.IdUsuario = u.IdUsuario
+    INNER JOIN [cfl].[Rol] r
+      ON r.IdRol = ur.IdRol
+     AND r.Activo = 1
+    LEFT JOIN [cfl].[RolPermiso] rp
+      ON rp.IdRol = r.IdRol
+    LEFT JOIN [cfl].[Permiso] p
+      ON p.IdPermiso = rp.IdPermiso
+     AND p.Activo = 1
+    WHERE u.IdUsuario = @userId
+      AND u.Activo = 1
+    ORDER BY r.Nombre ASC;
   `;
 
   const result = await pool.request().input("userId", parsedUserId).query(query);
@@ -137,22 +137,22 @@ async function fetchAuthByUsername(username) {
   const pool = await getPool();
   const query = `
     SELECT
-      r.nombre AS role_nombre,
-      p.clave AS permiso_clave
-    FROM [cfl].[CFL_usuario] u
-    INNER JOIN [cfl].[CFL_usuario_rol] ur
-      ON ur.id_usuario = u.id_usuario
-    INNER JOIN [cfl].[CFL_rol] r
-      ON r.id_rol = ur.id_rol
-     AND r.activo = 1
-    LEFT JOIN [cfl].[CFL_rol_permiso] rp
-      ON rp.id_rol = r.id_rol
-    LEFT JOIN [cfl].[CFL_permiso] p
-      ON p.id_permiso = rp.id_permiso
-     AND p.activo = 1
-    WHERE u.username = @username
-      AND u.activo = 1
-    ORDER BY r.nombre ASC;
+      r.Nombre AS role_nombre,
+      p.Clave AS permiso_clave
+    FROM [cfl].[Usuario] u
+    INNER JOIN [cfl].[UsuarioRol] ur
+      ON ur.IdUsuario = u.IdUsuario
+    INNER JOIN [cfl].[Rol] r
+      ON r.IdRol = ur.IdRol
+     AND r.Activo = 1
+    LEFT JOIN [cfl].[RolPermiso] rp
+      ON rp.IdRol = r.IdRol
+    LEFT JOIN [cfl].[Permiso] p
+      ON p.IdPermiso = rp.IdPermiso
+     AND p.Activo = 1
+    WHERE u.Username = @username
+      AND u.Activo = 1
+    ORDER BY r.Nombre ASC;
   `;
 
   const result = await pool.request().input("username", normalizedUsername).query(query);

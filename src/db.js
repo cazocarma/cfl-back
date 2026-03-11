@@ -6,6 +6,75 @@ const FALLBACK_DATABASE = "master";
 let poolPromise = null;
 let activeDatabase = null;
 
+function toSnakeCaseKey(key) {
+  if (typeof key !== "string" || !key) return null;
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z0-9]+)/g, "$1_$2")
+    .replace(/[\s\-]+/g, "_")
+    .toLowerCase();
+}
+
+function toPascalCaseKey(key) {
+  if (typeof key !== "string" || !key || !key.includes("_")) return null;
+  return key
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+}
+
+function augmentRowKeys(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return row;
+  }
+
+  for (const key of Object.keys(row)) {
+    const value = row[key];
+
+    const snake = toSnakeCaseKey(key);
+    if (snake && !(snake in row)) {
+      row[snake] = value;
+    }
+
+    const pascal = toPascalCaseKey(key);
+    if (pascal && !(pascal in row)) {
+      row[pascal] = value;
+    }
+  }
+
+  return row;
+}
+
+function augmentResultRows(result) {
+  if (!result || typeof result !== "object") {
+    return result;
+  }
+
+  if (Array.isArray(result.recordset)) {
+    result.recordset = result.recordset.map(augmentRowKeys);
+  }
+
+  if (Array.isArray(result.recordsets)) {
+    result.recordsets = result.recordsets.map((recordset) =>
+      Array.isArray(recordset) ? recordset.map(augmentRowKeys) : recordset
+    );
+  }
+
+  return result;
+}
+
+if (!sql.Request.prototype.__cflQueryAugmented) {
+  const originalQuery = sql.Request.prototype.query;
+
+  sql.Request.prototype.query = async function patchedQuery(...args) {
+    const result = await originalQuery.apply(this, args);
+    return augmentResultRows(result);
+  };
+
+  sql.Request.prototype.__cflQueryAugmented = true;
+}
+
 function createPool(database) {
   const pool = new sql.ConnectionPool({
     server: config.db.host,

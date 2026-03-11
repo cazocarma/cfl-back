@@ -1,443 +1,519 @@
 const MAINTAINERS = {
   temporadas: {
     title: "Temporadas",
-    table: "[cfl].[CFL_temporada]",
+    table: "[cfl].[Temporada]",
     alias: "t",
-    idColumn: "id_temporada",
-    orderBy: "t.fecha_inicio DESC",
+    idColumn: "IdTemporada",
+    orderBy: "t.FechaInicio DESC",
     listColumns: [
-      "t.id_temporada",
-      "t.codigo",
-      "t.nombre",
-      "t.fecha_inicio",
-      "t.fecha_fin",
-      "t.activa",
-      "t.cerrada",
-      "t.fecha_cierre",
-      "t.id_usuario_cierre",
-      "t.observacion_cierre",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdTemporada",
+      "t.Codigo",
+      "t.Nombre",
+      "t.FechaInicio",
+      "t.FechaFin",
+      "t.Activa",
+      "t.Cerrada",
+      "t.FechaCierre",
+      "t.IdUsuarioCierre",
+      "t.ObservacionCierre",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["codigo", "nombre", "fecha_inicio", "fecha_fin"],
-      optional: ["activa", "cerrada", "fecha_cierre", "id_usuario_cierre", "observacion_cierre"]
+      required: ["Codigo", "Nombre", "FechaInicio", "FechaFin"],
+      optional: ["Activa", "Cerrada", "FechaCierre", "IdUsuarioCierre", "ObservacionCierre"]
     },
     update: {
       allowed: [
-        "codigo",
-        "nombre",
-        "fecha_inicio",
-        "fecha_fin",
-        "activa",
-        "cerrada",
-        "fecha_cierre",
-        "id_usuario_cierre",
-        "observacion_cierre"
+        "Codigo",
+        "Nombre",
+        "FechaInicio",
+        "FechaFin",
+        "Activa",
+        "Cerrada",
+        "FechaCierre",
+        "IdUsuarioCierre",
+        "ObservacionCierre"
       ]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
-    softDeleteColumn: "activa"
+    softDeleteColumn: "Activa"
   },
   "centros-costo": {
     title: "Centros de Costo",
-    table: "[cfl].[CFL_centro_costo]",
+    table: "[cfl].[CentroCosto]",
     alias: "t",
-    idColumn: "id_centro_costo",
-    orderBy: "t.nombre ASC",
-    listColumns: ["t.id_centro_costo", "t.sap_codigo", "t.nombre", "t.activo"],
+    idColumn: "IdCentroCosto",
+    orderBy: "t.Nombre ASC",
+    listColumns: ["t.IdCentroCosto", "t.SapCodigo", "t.Nombre", "t.Activo"],
     create: {
-      required: ["sap_codigo", "nombre"],
-      optional: ["activo"]
+      required: ["SapCodigo", "Nombre"],
+      optional: ["Activo"]
     },
     update: {
-      allowed: ["sap_codigo", "nombre", "activo"]
+      allowed: ["SapCodigo", "Nombre", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   "tipos-flete": {
     title: "Tipos de Flete",
-    table: "[cfl].[CFL_tipo_flete]",
+    table: "[cfl].[TipoFlete]",
     alias: "t",
-    idColumn: "id_tipo_flete",
-    from: "[cfl].[CFL_tipo_flete] t INNER JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = t.id_centro_costo",
-    orderBy: "t.nombre ASC",
+    idColumn: "IdTipoFlete",
+    from: "[cfl].[TipoFlete] t INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto",
+    orderBy: "t.Nombre ASC",
     listColumns: [
-      "t.id_tipo_flete",
-      "t.sap_codigo",
-      "t.nombre",
-      "t.activo",
-      "t.id_centro_costo",
-      "cc.sap_codigo AS centro_costo_sap_codigo",
-      "cc.nombre AS centro_costo_nombre"
+      "t.IdTipoFlete",
+      "t.SapCodigo",
+      "t.Nombre",
+      "t.Activo",
+      "t.IdCentroCosto",
+      "cc.SapCodigo AS CentroCostoSapCodigo",
+      "cc.Nombre AS CentroCostoNombre"
     ],
     create: {
-      required: ["sap_codigo", "nombre", "id_centro_costo"],
-      optional: ["activo"]
+      required: ["SapCodigo", "Nombre", "IdCentroCosto"],
+      optional: ["Activo"]
     },
     update: {
-      allowed: ["sap_codigo", "nombre", "id_centro_costo", "activo"]
+      allowed: ["SapCodigo", "Nombre", "IdCentroCosto", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   "detalles-viaje": {
     title: "Detalles de Viaje",
-    table: "[cfl].[CFL_detalle_viaje]",
+    table: "[cfl].[DetalleViaje]",
     alias: "t",
-    idColumn: "id_detalle_viaje",
-    orderBy: "t.descripcion ASC",
-    listColumns: ["t.id_detalle_viaje", "t.descripcion", "t.observacion", "t.activo"],
+    idColumn: "IdDetalleViaje",
+    orderBy: "t.Descripcion ASC",
+    listColumns: ["t.IdDetalleViaje", "t.Descripcion", "t.Observacion", "t.Activo"],
     create: {
-      required: ["descripcion"],
-      optional: ["observacion", "activo"]
+      required: ["Descripcion"],
+      optional: ["Observacion", "Activo"]
     },
     update: {
-      allowed: ["descripcion", "observacion", "activo"]
+      allowed: ["Descripcion", "Observacion", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   especies: {
     title: "Especies",
-    table: "[cfl].[CFL_especie]",
+    table: "[cfl].[Especie]",
     alias: "t",
-    idColumn: "id_especie",
-    orderBy: "t.glosa ASC",
-    listColumns: ["t.id_especie", "t.glosa"],
+    idColumn: "IdEspecie",
+    orderBy: "t.Glosa ASC",
+    listColumns: ["t.IdEspecie", "t.Glosa"],
     create: {
-      required: ["glosa"],
+      required: ["Glosa"],
       optional: []
     },
     update: {
-      allowed: ["glosa"]
+      allowed: ["Glosa"]
     }
   },
   nodos: {
     title: "Nodos Logisticos",
-    table: "[cfl].[CFL_nodo_logistico]",
+    table: "[cfl].[NodoLogistico]",
     alias: "t",
-    idColumn: "id_nodo",
-    orderBy: "t.nombre ASC",
-    listColumns: ["t.id_nodo", "t.nombre", "t.region", "t.comuna", "t.ciudad", "t.calle", "t.activo"],
+    idColumn: "IdNodo",
+    orderBy: "t.Nombre ASC",
+    listColumns: ["t.IdNodo", "t.Nombre", "t.Region", "t.Comuna", "t.Ciudad", "t.Calle", "t.Activo"],
     create: {
-      required: ["nombre", "region", "comuna", "ciudad", "calle"],
-      optional: ["activo"]
+      required: ["Nombre", "Region", "Comuna", "Ciudad", "Calle"],
+      optional: ["Activo"]
     },
     update: {
-      allowed: ["nombre", "region", "comuna", "ciudad", "calle", "activo"]
+      allowed: ["Nombre", "Region", "Comuna", "Ciudad", "Calle", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   rutas: {
     title: "Rutas",
-    table: "[cfl].[CFL_ruta]",
+    table: "[cfl].[Ruta]",
     alias: "t",
-    idColumn: "id_ruta",
-    from: "[cfl].[CFL_ruta] t INNER JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = t.id_origen_nodo INNER JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = t.id_destino_nodo",
-    orderBy: "t.nombre_ruta ASC",
+    idColumn: "IdRuta",
+    from: "[cfl].[Ruta] t INNER JOIN [cfl].[NodoLogistico] no ON no.IdNodo = t.IdOrigenNodo INNER JOIN [cfl].[NodoLogistico] nd ON nd.IdNodo = t.IdDestinoNodo",
+    orderBy: "t.NombreRuta ASC",
     listColumns: [
-      "t.id_ruta",
-      "t.id_origen_nodo",
-      "no.nombre AS origen_nombre",
-      "t.id_destino_nodo",
-      "nd.nombre AS destino_nombre",
-      "t.nombre_ruta",
-      "t.distancia_km",
-      "t.activo",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdRuta",
+      "t.IdOrigenNodo",
+      "no.Nombre AS OrigenNombre",
+      "t.IdDestinoNodo",
+      "nd.Nombre AS DestinoNombre",
+      "t.NombreRuta",
+      "t.DistanciaKm",
+      "t.Activo",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["id_origen_nodo", "id_destino_nodo", "nombre_ruta"],
-      optional: ["distancia_km", "activo"]
+      required: ["IdOrigenNodo", "IdDestinoNodo", "NombreRuta"],
+      optional: ["DistanciaKm", "Activo"]
     },
     update: {
-      allowed: ["id_origen_nodo", "id_destino_nodo", "nombre_ruta", "distancia_km", "activo"]
+      allowed: ["IdOrigenNodo", "IdDestinoNodo", "NombreRuta", "DistanciaKm", "Activo"]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   "tipos-camion": {
     title: "Tipos de Camion",
-    table: "[cfl].[CFL_tipo_camion]",
+    table: "[cfl].[TipoCamion]",
     alias: "t",
-    idColumn: "id_tipo_camion",
-    orderBy: "t.nombre ASC",
+    idColumn: "IdTipoCamion",
+    orderBy: "t.Nombre ASC",
     listColumns: [
-      "t.id_tipo_camion",
-      "t.nombre",
-      "t.categoria",
-      "t.capacidad_kg",
-      "t.requiere_temperatura",
-      "t.descripcion",
-      "t.activo"
+      "t.IdTipoCamion",
+      "t.Nombre",
+      "t.Categoria",
+      "t.CapacidadKg",
+      "t.RequiereTemperatura",
+      "t.Descripcion",
+      "t.Activo"
     ],
     create: {
-      required: ["nombre", "categoria", "capacidad_kg", "requiere_temperatura"],
-      optional: ["descripcion", "activo"]
+      required: ["Nombre", "Categoria", "CapacidadKg", "RequiereTemperatura"],
+      optional: ["Descripcion", "Activo"]
     },
     update: {
-      allowed: ["nombre", "categoria", "capacidad_kg", "requiere_temperatura", "descripcion", "activo"]
+      allowed: ["Nombre", "Categoria", "CapacidadKg", "RequiereTemperatura", "Descripcion", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   camiones: {
     title: "Camiones",
-    table: "[cfl].[CFL_camion]",
+    table: "[cfl].[Camion]",
     alias: "t",
-    idColumn: "id_camion",
-    from: "[cfl].[CFL_camion] t INNER JOIN [cfl].[CFL_tipo_camion] tc ON tc.id_tipo_camion = t.id_tipo_camion",
-    orderBy: "t.sap_patente ASC, t.sap_carro ASC",
+    idColumn: "IdCamion",
+    from: "[cfl].[Camion] t INNER JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = t.IdTipoCamion",
+    orderBy: "t.SapPatente ASC, t.SapCarro ASC",
     listColumns: [
-      "t.id_camion",
-      "t.id_tipo_camion",
-      "tc.nombre AS tipo_camion_nombre",
-      "t.sap_patente",
-      "t.sap_carro",
-      "t.activo",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdCamion",
+      "t.IdTipoCamion",
+      "tc.Nombre AS TipoCamionNombre",
+      "t.SapPatente",
+      "t.SapCarro",
+      "t.Activo",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["id_tipo_camion", "sap_patente", "sap_carro"],
-      optional: ["activo"]
+      required: ["IdTipoCamion", "SapPatente", "SapCarro"],
+      optional: ["Activo"]
     },
     update: {
-      allowed: ["id_tipo_camion", "sap_patente", "sap_carro", "activo"]
+      allowed: ["IdTipoCamion", "SapPatente", "SapCarro", "Activo"]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   "empresas-transporte": {
     title: "Empresas de Transporte",
-    table: "[cfl].[CFL_empresa_transporte]",
+    table: "[cfl].[EmpresaTransporte]",
     alias: "t",
-    idColumn: "id_empresa",
-    orderBy: "t.razon_social ASC",
+    idColumn: "IdEmpresa",
+    orderBy: "t.RazonSocial ASC",
     listColumns: [
-      "t.id_empresa",
-      "t.sap_codigo",
-      "t.rut",
-      "t.razon_social",
-      "t.nombre_rep",
-      "t.correo",
-      "t.telefono",
-      "t.activo",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdEmpresa",
+      "t.SapCodigo",
+      "t.Rut",
+      "t.RazonSocial",
+      "t.NombreRepresentante",
+      "t.Correo",
+      "t.Telefono",
+      "t.Activo",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["rut"],
-      optional: ["sap_codigo", "razon_social", "nombre_rep", "correo", "telefono", "activo"]
+      required: ["Rut"],
+      optional: ["SapCodigo", "RazonSocial", "NombreRepresentante", "Correo", "Telefono", "Activo"]
     },
     update: {
-      allowed: ["sap_codigo", "rut", "razon_social", "nombre_rep", "correo", "telefono", "activo"]
+      allowed: ["SapCodigo", "Rut", "RazonSocial", "NombreRepresentante", "Correo", "Telefono", "Activo"]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
-  choferes: {
-    title: "Choferes",
-    table: "[cfl].[CFL_chofer]",
+  productores: {
+    title: "Productores",
+    table: "[cfl].[Productor]",
     alias: "t",
-    idColumn: "id_chofer",
-    orderBy: "t.sap_nombre ASC",
-    listColumns: ["t.id_chofer", "t.sap_id_fiscal", "t.sap_nombre", "t.telefono", "t.activo"],
-    create: {
-      required: ["sap_id_fiscal", "sap_nombre"],
-      optional: ["telefono", "activo"]
-    },
-    update: {
-      allowed: ["sap_id_fiscal", "sap_nombre", "telefono", "activo"]
-    },
-    softDeleteColumn: "activo"
-  },
-  tarifas: {
-    title: "Tarifas",
-    table: "[cfl].[CFL_tarifa]",
-    alias: "t",
-    idColumn: "id_tarifa",
-    from: "[cfl].[CFL_tarifa] t INNER JOIN [cfl].[CFL_tipo_camion] tc ON tc.id_tipo_camion = t.id_tipo_camion INNER JOIN [cfl].[CFL_temporada] tp ON tp.id_temporada = t.id_temporada INNER JOIN [cfl].[CFL_ruta] r ON r.id_ruta = t.id_ruta INNER JOIN [cfl].[CFL_nodo_logistico] no ON no.id_nodo = r.id_origen_nodo INNER JOIN [cfl].[CFL_nodo_logistico] nd ON nd.id_nodo = r.id_destino_nodo",
-    orderBy: "t.id_tarifa DESC",
+    idColumn: "IdProductor",
+    orderBy: "t.Nombre ASC",
     listColumns: [
-      "t.id_tarifa",
-      "t.id_tipo_camion",
-      "tc.nombre AS tipo_camion_nombre",
-      "t.id_temporada",
-      "tp.codigo AS temporada_codigo",
-      "t.id_ruta",
-      "r.nombre_ruta",
-      "no.nombre AS ruta_origen_nombre",
-      "nd.nombre AS ruta_destino_nombre",
-      "t.vigencia_desde",
-      "t.vigencia_hasta",
-      "t.prioridad",
-      "t.regla",
-      "t.moneda",
-      "t.monto_fijo",
-      "t.activo",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdProductor",
+      "t.CodigoProveedor",
+      "t.Rut",
+      "t.Nombre",
+      "t.Pais",
+      "t.Region",
+      "t.Comuna",
+      "t.Distrito",
+      "t.Calle",
+      "t.Email",
+      "t.OrganizacionCompra",
+      "t.MonedaPedido",
+      "t.CondicionPago",
+      "t.Incoterm",
+      "t.Sociedad",
+      "t.CuentaAsociada",
+      "t.Activo",
+      "t.FechaActualizacionSap",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["id_tipo_camion", "id_temporada", "id_ruta", "vigencia_desde", "prioridad", "regla", "moneda", "monto_fijo"],
-      optional: ["vigencia_hasta", "activo"]
+      required: ["CodigoProveedor", "Nombre"],
+      optional: [
+        "Rut",
+        "Pais",
+        "Region",
+        "Comuna",
+        "Distrito",
+        "Calle",
+        "Email",
+        "OrganizacionCompra",
+        "MonedaPedido",
+        "CondicionPago",
+        "Incoterm",
+        "Sociedad",
+        "CuentaAsociada",
+        "Activo",
+        "FechaActualizacionSap"
+      ]
     },
     update: {
       allowed: [
-        "id_tipo_camion",
-        "id_temporada",
-        "id_ruta",
-        "vigencia_desde",
-        "vigencia_hasta",
-        "prioridad",
-        "regla",
-        "moneda",
-        "monto_fijo",
-        "activo"
+        "CodigoProveedor",
+        "Rut",
+        "Nombre",
+        "Pais",
+        "Region",
+        "Comuna",
+        "Distrito",
+        "Calle",
+        "Email",
+        "OrganizacionCompra",
+        "MonedaPedido",
+        "CondicionPago",
+        "Incoterm",
+        "Sociedad",
+        "CuentaAsociada",
+        "Activo",
+        "FechaActualizacionSap"
       ]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
+  },
+  choferes: {
+    title: "Choferes",
+    table: "[cfl].[Chofer]",
+    alias: "t",
+    idColumn: "IdChofer",
+    orderBy: "t.SapNombre ASC",
+    listColumns: ["t.IdChofer", "t.SapIdFiscal", "t.SapNombre", "t.Telefono", "t.Activo"],
+    create: {
+      required: ["SapIdFiscal", "SapNombre"],
+      optional: ["Telefono", "Activo"]
+    },
+    update: {
+      allowed: ["SapIdFiscal", "SapNombre", "Telefono", "Activo"]
+    },
+    softDeleteColumn: "Activo"
+  },
+  tarifas: {
+    title: "Tarifas",
+    table: "[cfl].[Tarifa]",
+    alias: "t",
+    idColumn: "IdTarifa",
+    from: "[cfl].[Tarifa] t INNER JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = t.IdTipoCamion INNER JOIN [cfl].[Temporada] tp ON tp.IdTemporada = t.IdTemporada INNER JOIN [cfl].[Ruta] r ON r.IdRuta = t.IdRuta INNER JOIN [cfl].[NodoLogistico] no ON no.IdNodo = r.IdOrigenNodo INNER JOIN [cfl].[NodoLogistico] nd ON nd.IdNodo = r.IdDestinoNodo",
+    orderBy: "t.IdTarifa DESC",
+    listColumns: [
+      "t.IdTarifa",
+      "t.IdTipoCamion",
+      "tc.Nombre AS TipoCamionNombre",
+      "t.IdTemporada",
+      "tp.Codigo AS TemporadaCodigo",
+      "tp.Nombre AS TemporadaNombre",
+      "t.IdRuta",
+      "r.NombreRuta",
+      "no.Nombre AS RutaOrigenNombre",
+      "nd.Nombre AS RutaDestinoNombre",
+      "t.VigenciaDesde",
+      "t.VigenciaHasta",
+      "t.Prioridad",
+      "t.Regla",
+      "t.Moneda",
+      "t.MontoFijo",
+      "t.Activo",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
+    ],
+    create: {
+      required: ["IdTipoCamion", "IdTemporada", "IdRuta", "VigenciaDesde", "Prioridad", "Regla", "Moneda", "MontoFijo"],
+      optional: ["VigenciaHasta", "Activo"]
+    },
+    update: {
+      allowed: [
+        "IdTipoCamion",
+        "IdTemporada",
+        "IdRuta",
+        "VigenciaDesde",
+        "VigenciaHasta",
+        "Prioridad",
+        "Regla",
+        "Moneda",
+        "MontoFijo",
+        "Activo"
+      ]
+    },
+    timestamps: {
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
+    },
+    softDeleteColumn: "Activo"
   },
   "cuentas-mayor": {
     title: "Cuentas Mayores",
-    table: "[cfl].[CFL_cuenta_mayor]",
+    table: "[cfl].[CuentaMayor]",
     alias: "t",
-    idColumn: "id_cuenta_mayor",
-    orderBy: "t.codigo ASC",
-    listColumns: ["t.id_cuenta_mayor", "t.codigo", "t.glosa"],
+    idColumn: "IdCuentaMayor",
+    orderBy: "t.Codigo ASC",
+    listColumns: ["t.IdCuentaMayor", "t.Codigo", "t.Glosa"],
     create: {
-      required: ["codigo", "glosa"],
+      required: ["Codigo", "Glosa"],
       optional: []
     },
     update: {
-      allowed: ["codigo", "glosa"]
+      allowed: ["Codigo", "Glosa"]
     }
   },
   folios: {
     title: "Folios",
-    table: "[cfl].[CFL_folio]",
+    table: "[cfl].[Folio]",
     alias: "t",
-    idColumn: "id_folio",
-    from: "[cfl].[CFL_folio] t INNER JOIN [cfl].[CFL_temporada] tp ON tp.id_temporada = t.id_temporada INNER JOIN [cfl].[CFL_centro_costo] cc ON cc.id_centro_costo = t.id_centro_costo",
-    orderBy: "t.created_at DESC",
+    idColumn: "IdFolio",
+    from: "[cfl].[Folio] t INNER JOIN [cfl].[Temporada] tp ON tp.IdTemporada = t.IdTemporada INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto",
+    orderBy: "t.FechaCreacion DESC",
     listColumns: [
-      "t.id_folio",
-      "t.id_centro_costo",
-      "cc.sap_codigo AS centro_costo_sap_codigo",
-      "cc.nombre AS centro_costo_nombre",
-      "t.id_temporada",
-      "tp.codigo AS temporada_codigo",
-      "t.folio_numero",
-      "t.periodo_desde",
-      "t.periodo_hasta",
-      "t.estado",
-      "t.bloqueado",
-      "t.fecha_cierre",
-      "t.resultado_cuadratura",
-      "t.resumen_cuadratura",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdFolio",
+      "t.IdCentroCosto",
+      "cc.SapCodigo AS CentroCostoSapCodigo",
+      "cc.Nombre AS CentroCostoNombre",
+      "t.IdTemporada",
+      "tp.Codigo AS TemporadaCodigo",
+      "t.FolioNumero",
+      "t.PeriodoDesde",
+      "t.PeriodoHasta",
+      "t.Estado",
+      "t.Bloqueado",
+      "t.FechaCierre",
+      "t.ResultadoCuadratura",
+      "t.ResumenCuadratura",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["id_centro_costo", "id_temporada", "folio_numero", "estado"],
-      optional: ["periodo_desde", "periodo_hasta", "bloqueado", "fecha_cierre", "resultado_cuadratura", "resumen_cuadratura"]
+      required: ["IdCentroCosto", "IdTemporada", "FolioNumero", "Estado"],
+      optional: ["PeriodoDesde", "PeriodoHasta", "Bloqueado", "FechaCierre", "ResultadoCuadratura", "ResumenCuadratura"]
     },
     update: {
       allowed: [
-        "id_centro_costo",
-        "id_temporada",
-        "folio_numero",
-        "periodo_desde",
-        "periodo_hasta",
-        "estado",
-        "bloqueado",
-        "fecha_cierre",
-        "resultado_cuadratura",
-        "resumen_cuadratura"
+        "IdCentroCosto",
+        "IdTemporada",
+        "FolioNumero",
+        "PeriodoDesde",
+        "PeriodoHasta",
+        "Estado",
+        "Bloqueado",
+        "FechaCierre",
+        "ResultadoCuadratura",
+        "ResumenCuadratura"
       ]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     }
   },
   usuarios: {
     title: "Usuarios",
-    table: "[cfl].[CFL_usuario]",
+    table: "[cfl].[Usuario]",
     alias: "t",
-    idColumn: "id_usuario",
-    orderBy: "t.username ASC",
+    idColumn: "IdUsuario",
+    orderBy: "t.Username ASC",
     listColumns: [
-      "t.id_usuario",
-      "t.username",
-      "t.email",
-      "t.nombre",
-      "t.apellido",
-      "t.activo",
-      "t.ultimo_login",
-      "t.created_at",
-      "t.updated_at"
+      "t.IdUsuario",
+      "t.Username",
+      "t.Email",
+      "t.Nombre",
+      "t.Apellido",
+      "t.Activo",
+      "t.UltimoLogin",
+      "t.FechaCreacion",
+      "t.FechaActualizacion"
     ],
     create: {
-      required: ["username", "email", "password_hash"],
-      optional: ["nombre", "apellido", "activo"]
+      required: ["Username", "Email", "PasswordHash"],
+      optional: ["Nombre", "Apellido", "Activo"]
     },
     update: {
-      allowed: ["username", "email", "password_hash", "nombre", "apellido", "activo", "ultimo_login"]
+      allowed: ["Username", "Email", "PasswordHash", "Nombre", "Apellido", "Activo", "UltimoLogin"]
     },
     timestamps: {
-      created: "created_at",
-      updated: "updated_at"
+      created: "FechaCreacion",
+      updated: "FechaActualizacion"
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   roles: {
     title: "Roles",
-    table: "[cfl].[CFL_rol]",
+    table: "[cfl].[Rol]",
     alias: "t",
-    idColumn: "id_rol",
-    orderBy: "t.nombre ASC",
-    listColumns: ["t.id_rol", "t.nombre", "t.descripcion", "t.activo"],
+    idColumn: "IdRol",
+    orderBy: "t.Nombre ASC",
+    listColumns: ["t.IdRol", "t.Nombre", "t.Descripcion", "t.Activo"],
     create: {
-      required: ["nombre"],
-      optional: ["descripcion", "activo"]
+      required: ["Nombre"],
+      optional: ["Descripcion", "Activo"]
     },
     update: {
-      allowed: ["nombre", "descripcion", "activo"]
+      allowed: ["Nombre", "Descripcion", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   },
   permisos: {
     title: "Permisos",
-    table: "[cfl].[CFL_permiso]",
+    table: "[cfl].[Permiso]",
     alias: "t",
-    idColumn: "id_permiso",
-    orderBy: "t.clave ASC",
-    listColumns: ["t.id_permiso", "t.clave", "t.recurso", "t.accion", "t.descripcion", "t.activo"],
+    idColumn: "IdPermiso",
+    orderBy: "t.Clave ASC",
+    listColumns: ["t.IdPermiso", "t.Clave", "t.Recurso", "t.Accion", "t.Descripcion", "t.Activo"],
     create: {
-      required: ["clave", "recurso", "accion"],
-      optional: ["descripcion", "activo"]
+      required: ["Clave", "Recurso", "Accion"],
+      optional: ["Descripcion", "Activo"]
     },
     update: {
-      allowed: ["clave", "recurso", "accion", "descripcion", "activo"]
+      allowed: ["Clave", "Recurso", "Accion", "Descripcion", "Activo"]
     },
-    softDeleteColumn: "activo"
+    softDeleteColumn: "Activo"
   }
 };
 
