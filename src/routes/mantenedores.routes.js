@@ -3,7 +3,7 @@ const bcrypt = require("bcryptjs");
 const { getPool } = require("../db");
 const { MAINTAINERS } = require("../mantenedores-config");
 const { hasAnyPermission, resolveAuthContext } = require("../authz");
-const { normalizeLifecycleStatus } = require("../helpers");
+const { normalizeLifecycleStatus } = require("../utils/lifecycle");
 
 const router = express.Router();
 

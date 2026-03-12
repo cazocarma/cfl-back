@@ -5,9 +5,13 @@ const {
   parseOptionalBigInt,
   parseRequiredBigInt,
   normalizeTipoMovimiento,
+} = require("../utils/parse");
+const {
   LIFECYCLE_STATUS,
   normalizeLifecycleStatus,
   deriveLifecycleStatus,
+} = require("../utils/lifecycle");
+const {
   resolveMovilId,
   resolveFolioForLifecycle,
   resolveImputacionFlete,

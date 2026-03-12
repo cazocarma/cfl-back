@@ -7,6 +7,41 @@ const { JWT_SECRET } = require("../middleware/auth.middleware");
 
 const router = express.Router();
 
+// Rate limiting en memoria para el endpoint de login.
+// Máximo 10 intentos por IP en una ventana de 15 minutos.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+const loginAttempts = new Map(); // Map<ip, { count, resetAt }>
+
+function loginRateLimiter(req, res, next) {
+  const ip = req.ip || req.socket?.remoteAddress || "unknown";
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+
+  if (entry && now < entry.resetAt) {
+    if (entry.count >= LOGIN_MAX_ATTEMPTS) {
+      const retryAfterSecs = Math.ceil((entry.resetAt - now) / 1000);
+      res.setHeader("Retry-After", String(retryAfterSecs));
+      return res.status(429).json({
+        error: "Demasiados intentos de inicio de sesión. Intenta más tarde.",
+      });
+    }
+    entry.count += 1;
+  } else {
+    loginAttempts.set(ip, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+  }
+
+  return next();
+}
+
+// Limpieza periódica de entradas expiradas (cada 15 min) para evitar crecimiento ilimitado.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) {
+    if (now >= entry.resetAt) loginAttempts.delete(ip);
+  }
+}, LOGIN_WINDOW_MS).unref();
+
 router.get("/context", async (req, res, next) => {
   try {
     const context = await resolveAuthContext(req);
@@ -35,7 +70,7 @@ router.get("/context", async (req, res, next) => {
  * POST /api/auth/login
  * Autentica con email + password; devuelve token JWT de 8h.
  */
-router.post("/login", async (req, res, next) => {
+router.post("/login", loginRateLimiter, async (req, res, next) => {
   try {
     const email = String(req.body?.email || "").trim();
     const password = String(req.body?.password || "");

@@ -14,12 +14,21 @@ const { normalizeJsonTextPayload } = require("./text-normalizer");
 
 const app = express();
 
+// Cabeceras de seguridad básicas (sin dependencias externas)
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("X-XSS-Protection", "0"); // CSP es preferible; deshabilitar el modo legacy
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+
 app.use(
   cors({
     origin: config.app.corsOrigin,
   })
 );
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);

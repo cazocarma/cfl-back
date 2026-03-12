@@ -1,6 +1,6 @@
 const express = require("express");
 const { getPool } = require("../db");
-const { clamp, parsePositiveInt } = require("../helpers");
+const { clamp, parsePositiveInt } = require("../utils/parse");
 const { hasAnyPermission, resolveAuthContext } = require("../authz");
 
 const router = express.Router();

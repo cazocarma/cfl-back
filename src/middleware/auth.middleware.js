@@ -1,6 +1,14 @@
 const jwt = require("jsonwebtoken");
 
-const JWT_SECRET = process.env.JWT_SECRET || "cfl-dev-secret";
+const DEV_SECRET = "cfl-dev-secret";
+const JWT_SECRET = process.env.JWT_SECRET || DEV_SECRET;
+
+if (JWT_SECRET === DEV_SECRET && process.env.NODE_ENV === "production") {
+  console.error(
+    "[SEGURIDAD] JWT_SECRET no está configurado. Se está usando el secreto de desarrollo en producción. " +
+    "Configura la variable de entorno JWT_SECRET con un valor seguro."
+  );
+}
 
 /**
  * Middleware que valida el token JWT en el header Authorization.

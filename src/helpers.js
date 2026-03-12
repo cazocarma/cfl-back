@@ -1,116 +1,11 @@
 /**
- * Utilidades de parsing y ciclo de vida compartidas entre routes.
- * Centraliza lógica que antes estaba duplicada en dashboard y fletes.
+ * Helpers de acceso a BD compartidos entre routes.
+ * Para parsing y lógica de ciclo de vida ver utils/parse.js y utils/lifecycle.js.
  */
 
 const { sql } = require("./db");
-
-// ---------------------------------------------------------------------------
-// Parsing básico
-// ---------------------------------------------------------------------------
-
-/** Recorta un string; devuelve null si vacío o no es string. */
-function toNullableTrimmedString(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-/** Parsea un entero positivo; devuelve null si inválido o no positivo. */
-function parseOptionalBigInt(value) {
-  if (value === null || value === undefined || value === "") return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-/** Igual que parseOptionalBigInt pero semánticamente requerido en el contexto de uso. */
-function parseRequiredBigInt(value) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-/** Parsea entero positivo con fallback; usado en paginación. */
-function parsePositiveInt(value, fallback) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-/** Limita value al rango [min, max]. */
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-// ---------------------------------------------------------------------------
-// Normalización de dominio
-// ---------------------------------------------------------------------------
-
-/** Normaliza tipo de movimiento a PUSH o PULL; devuelve null si inválido. */
-function normalizeTipoMovimiento(value) {
-  const normalized = String(value || "").trim().toUpperCase();
-  if (normalized === "PUSH" || normalized === "DESPACHO") return "PUSH";
-  if (normalized === "PULL" || normalized === "RETORNO") return "PULL";
-  return null;
-}
-
-/** Estados canónicos del ciclo de vida de un flete. */
-const LIFECYCLE_STATUS = {
-  DETECTADO: "DETECTADO",
-  ACTUALIZADO: "ACTUALIZADO",
-  ANULADO: "ANULADO",
-  EN_REVISION: "EN_REVISION",
-  COMPLETADO: "COMPLETADO",
-  ASIGNADO_FOLIO: "ASIGNADO_FOLIO",
-  FACTURADO: "FACTURADO",
-};
-
-/**
- * Normaliza un valor de estado a su clave canónica.
- * Maneja alias heredados (COMPLETO, VALIDADO, CERRADO).
- * Devuelve null si el valor no es reconocido.
- */
-function normalizeLifecycleStatus(rawStatus) {
-  const normalized = String(rawStatus || "").trim().toUpperCase();
-  if (!normalized) return null;
-
-  if (normalized === "COMPLETO") return LIFECYCLE_STATUS.COMPLETADO;
-  if (normalized === "VALIDADO") return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
-  if (normalized === "CERRADO") return LIFECYCLE_STATUS.FACTURADO;
-
-  return Object.values(LIFECYCLE_STATUS).includes(normalized) ? normalized : null;
-}
-
-/**
- * Deriva el estado del ciclo de vida según las condiciones actuales del flete.
- * Los estados ANULADO y FACTURADO son forzados desde el request; el resto se calcula.
- */
-function deriveLifecycleStatus({
-  requestedStatus,
-  idFolio,
-  idTipoFlete,
-  idCentroCosto,
-  idDetalleViaje,
-  idMovil,
-  idTarifa,
-  hasDetalles,
-}) {
-  if (requestedStatus === LIFECYCLE_STATUS.ANULADO) return LIFECYCLE_STATUS.ANULADO;
-  if (requestedStatus === LIFECYCLE_STATUS.FACTURADO) return LIFECYCLE_STATUS.FACTURADO;
-  if (idFolio && Number(idFolio) > 0) return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
-
-  const isComplete =
-    Boolean(idTipoFlete) &&
-    Boolean(idCentroCosto) &&
-    Boolean(idDetalleViaje) &&
-    Boolean(idMovil) &&
-    Boolean(idTarifa) &&
-    Boolean(hasDetalles);
-
-  return isComplete ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.EN_REVISION;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers de BD: movil y folio
-// ---------------------------------------------------------------------------
+const { parseOptionalBigInt } = require("./utils/parse");
+const { LIFECYCLE_STATUS } = require("./utils/lifecycle");
 
 /**
  * Resuelve el id_movil para una cabecera.
@@ -361,19 +256,10 @@ async function resolveImputacionFlete(transaction, {
 }
 
 module.exports = {
-  // Parsing
-  toNullableTrimmedString,
-  parseOptionalBigInt,
-  parseRequiredBigInt,
-  parsePositiveInt,
-  clamp,
-  // Dominio
-  normalizeTipoMovimiento,
-  LIFECYCLE_STATUS,
-  normalizeLifecycleStatus,
-  deriveLifecycleStatus,
-  // BD
+  buildDomainError,
   resolveMovilId,
   resolveFolioForLifecycle,
   resolveImputacionFlete,
+  // Re-exports for convenience (use direct imports from utils/ for new code)
+  LIFECYCLE_STATUS,
 };

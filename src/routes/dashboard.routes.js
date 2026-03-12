@@ -8,9 +8,13 @@ const {
   parseOptionalBigInt,
   parseRequiredBigInt,
   normalizeTipoMovimiento,
+} = require("../utils/parse");
+const {
   LIFECYCLE_STATUS,
   normalizeLifecycleStatus,
   deriveLifecycleStatus,
+} = require("../utils/lifecycle");
+const {
   resolveMovilId,
   resolveFolioForLifecycle,
   resolveImputacionFlete,
@@ -22,6 +26,7 @@ function buildMissingDeliveriesQuery(filters) {
   const whereClauses = [
     "NOT EXISTS (SELECT 1 FROM [cfl].[FleteSapEntrega] fe WHERE fe.IdSapEntrega = c.IdSapEntrega)",
     "NOT EXISTS (SELECT 1 FROM [cfl].[SapEntregaDescarte] sd WHERE sd.IdSapEntrega = c.IdSapEntrega AND sd.Activo = 1)",
+    "c.SapGuiaRemision IS NOT NULL",
   ];
 
   if (filters.search) {
@@ -38,10 +43,10 @@ function buildMissingDeliveriesQuery(filters) {
     whereClauses.push("c.SistemaFuente = @sourceSystem");
   }
   if (filters.fechaDesde) {
-    whereClauses.push("c.SapFechaSalida >= @fechaDesde");
+    whereClauses.push("CAST(c.SapFechaSalida AS DATE) >= CAST(@fechaDesde AS DATE)");
   }
   if (filters.fechaHasta) {
-    whereClauses.push("c.SapFechaSalida <= @fechaHasta");
+    whereClauses.push("CAST(c.SapFechaSalida AS DATE) <= CAST(@fechaHasta AS DATE)");
   }
   if (filters.estado) {
     whereClauses.push("c.Estado = @estado");
@@ -1104,7 +1109,24 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       ? new Date(Math.max(...salidaDates.map((d) => d.getTime())))
       : null;
 
-    const createFolioResult = await new sql.Request(transaction)
+    // Resolver IdCuentaMayor desde ImputacionFlete usando (IdTipoFlete, IdCentroCosto) de los movimientos.
+    // Si todos los movimientos convergen en una sola cuenta mayor activa, se asigna al folio.
+    const inParamsCuenta = cabeceraIds.map((_, i) => `@cb${i}`).join(",");
+    const cuentaReq = new sql.Request(transaction);
+    cabeceraIds.forEach((id, i) => cuentaReq.input(`cb${i}`, sql.BigInt, id));
+    const cuentaMayorResult = await cuentaReq.query(`
+      SELECT DISTINCT imp.IdCuentaMayor
+      FROM [cfl].[CabeceraFlete] cf
+      INNER JOIN [cfl].[ImputacionFlete] imp
+        ON imp.IdTipoFlete = cf.IdTipoFlete
+        AND imp.IdCentroCosto = cf.IdCentroCosto
+        AND imp.Activo = 1
+      WHERE cf.IdCabeceraFlete IN (${inParamsCuenta});
+    `);
+    const cuentaRows = cuentaMayorResult.recordset;
+    const idCuentaMayor = cuentaRows.length === 1 ? Number(cuentaRows[0].IdCuentaMayor) : null;
+
+    const createFolioReq = new sql.Request(transaction)
       .input("idCentroCosto", sql.BigInt, idCentroCosto)
       .input("idTemporada", sql.BigInt, idTemporada)
       .input("folioNumero", sql.VarChar(30), folioNumero)
@@ -1113,10 +1135,16 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       .input("estado", sql.VarChar(20), "ABIERTO")
       .input("bloqueado", sql.Bit, false)
       .input("createdAt", sql.DateTime2(0), now)
-      .input("updatedAt", sql.DateTime2(0), now)
-      .query(`
+      .input("updatedAt", sql.DateTime2(0), now);
+
+    if (idCuentaMayor) {
+      createFolioReq.input("idCuentaMayor", sql.BigInt, idCuentaMayor);
+    }
+
+    const createFolioResult = await createFolioReq.query(`
         INSERT INTO [cfl].[Folio] (
           [IdCentroCosto],
+          ${idCuentaMayor ? '[IdCuentaMayor],' : ''}
           [IdTemporada],
           [FolioNumero],
           [PeriodoDesde],
@@ -1129,6 +1157,7 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         OUTPUT INSERTED.IdFolio
         VALUES (
           @idCentroCosto,
+          ${idCuentaMayor ? '@idCuentaMayor,' : ''}
           @idTemporada,
           @folioNumero,
           @periodoDesde,
@@ -1171,6 +1200,7 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         folio_numero: folioNumero,
         id_temporada: idTemporada,
         id_centro_costo: idCentroCosto,
+        id_cuenta_mayor: idCuentaMayor,
         updated: cabeceraIds.length,
       },
     });
