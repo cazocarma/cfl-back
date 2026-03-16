@@ -5,20 +5,19 @@ const { getPool, getActiveDatabase } = require("./db");
 const { dashboardRouter } = require("./routes/dashboard.routes");
 const { mantenedoresRouter } = require("./routes/mantenedores.routes");
 const { fletesRouter } = require("./routes/fletes.routes");
-const { authRouter } = require("./routes/auth.routes");
+const { authnRouter } = require("./routes/authn.routes");
 const { operacionesRouter } = require("./routes/operaciones.routes");
 const { facturasRouter } = require("./routes/facturas.routes");
-const { jwtMiddleware } = require("./middleware/auth.middleware");
+const { requireJwtAuthn } = require("./middleware/authn.middleware");
 const { auditMiddleware } = require("./middleware/audit.middleware");
 const { normalizeJsonTextPayload } = require("./text-normalizer");
 
 const app = express();
 
-// Cabeceras de seguridad básicas (sin dependencias externas)
 app.use((_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("X-XSS-Protection", "0"); // CSP es preferible; deshabilitar el modo legacy
+  res.setHeader("X-XSS-Protection", "0");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   next();
 });
@@ -66,14 +65,16 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-// Rutas públicas: GET /, GET /health, POST /api/auth/login — sin JWT.
-// Todo lo demás requiere token válido.
 app.use((req, res, next) => {
-  const isPublic =
+  const isPublicRequest =
     (req.method === "GET" && (req.path === "/" || req.path === "/health")) ||
-    (req.method === "POST" && req.path === "/api/auth/login");
-  if (isPublic) return next();
-  return jwtMiddleware(req, res, next);
+    (req.method === "POST" && req.path === "/api/authn/login");
+
+  if (isPublicRequest) {
+    return next();
+  }
+
+  return requireJwtAuthn(req, res, next);
 });
 
 app.use(auditMiddleware);
@@ -83,11 +84,13 @@ app.use("/api/mantenedores", mantenedoresRouter);
 app.use("/api/fletes", fletesRouter);
 app.use("/api/operaciones", operacionesRouter);
 app.use("/api/facturas", facturasRouter);
-app.use("/api/auth", authRouter);
+app.use("/api/authn", authnRouter);
 
 app.use((error, _req, res, _next) => {
-  const message = error && error.message ? error.message : "Error interno del servidor";
-  const code = error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
+  const message =
+    error && error.message ? error.message : "Error interno del servidor";
+  const code =
+    error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
   const dbErrorCode = error && error.number ? error.number : null;
 
   if (dbErrorCode === 2627 || dbErrorCode === 2601) {

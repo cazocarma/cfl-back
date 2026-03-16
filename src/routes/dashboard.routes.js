@@ -1,6 +1,6 @@
 const express = require("express");
 const { getPool, sql } = require("../db");
-const { hasAnyPermission, resolveAuthContext } = require("../authz");
+const { hasAnyPermission, resolveAuthzContext } = require("../authz");
 const {
   clamp,
   parsePositiveInt,
@@ -58,12 +58,16 @@ function buildMissingDeliveriesQuery(filters) {
   `;
 }
 
-function hasAnyRole(auth, roles = []) {
-  if (!auth || !Array.isArray(auth.roleNames)) {
+function hasAnyRole(authzContext, roles = []) {
+  if (!authzContext || !Array.isArray(authzContext.roleNames)) {
     return false;
   }
 
-  const roleSet = new Set(auth.roleNames.map((role) => String(role || "").trim().toLowerCase()));
+  const roleSet = new Set(
+    authzContext.roleNames.map((role) =>
+      String(role || "").trim().toLowerCase()
+    )
+  );
   return roles.some((role) => roleSet.has(String(role || "").trim().toLowerCase()));
 }
 
@@ -814,18 +818,18 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
 });
 
 router.post("/folios/asignar", async (req, res, next) => {
-  let auth = null;
+  let authzContext = null;
   try {
-    auth = await resolveAuthContext(req);
+    authzContext = await resolveAuthzContext(req);
   } catch (error) {
     next(error);
     return;
   }
 
-  if (!hasAnyPermission(auth, ["folios.asignar", "folios.admin"])) {
+  if (!hasAnyPermission(authzContext, ["folios.asignar", "folios.admin"])) {
     res.status(403).json({
       error: "No tienes permisos para asignar folios",
-      role: auth?.primaryRole || null,
+      role: authzContext?.primaryRole || null,
     });
     return;
   }
@@ -958,18 +962,18 @@ router.post("/folios/asignar", async (req, res, next) => {
 });
 
 router.post("/folios/asignar-nuevo", async (req, res, next) => {
-  let auth = null;
+  let authzContext = null;
   try {
-    auth = await resolveAuthContext(req);
+    authzContext = await resolveAuthzContext(req);
   } catch (error) {
     next(error);
     return;
   }
 
-  if (!hasAnyPermission(auth, ["folios.asignar", "folios.admin"])) {
+  if (!hasAnyPermission(authzContext, ["folios.asignar", "folios.admin"])) {
     res.status(403).json({
       error: "No tienes permisos para asignar folios",
-      role: auth?.primaryRole || null,
+      role: authzContext?.primaryRole || null,
     });
     return;
   }
@@ -1230,19 +1234,22 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
     return;
   }
 
-  let auth = null;
+  let authzContext = null;
   try {
-    auth = await resolveAuthContext(req);
+    authzContext = await resolveAuthzContext(req);
   } catch (error) {
     next(error);
     return;
   }
 
-  const canAnularByRole = hasAnyRole(auth, ["autorizador", "administrador"]);
-  if (!canAnularByRole && !hasAnyPermission(auth, ["fletes.anular", "mantenedores.admin"])) {
+  const canAnularByRole = hasAnyRole(authzContext, ["autorizador", "administrador"]);
+  if (
+    !canAnularByRole &&
+    !hasAnyPermission(authzContext, ["fletes.anular", "mantenedores.admin"])
+  ) {
     res.status(403).json({
       error: "No tienes permisos para anular fletes",
-      role: auth?.primaryRole || null,
+      role: authzContext?.primaryRole || null,
     });
     return;
   }
@@ -1253,7 +1260,7 @@ router.post("/fletes/:id_cabecera_flete/anular", async (req, res, next) => {
     return;
   }
   const motivoFinal = motivo.slice(0, 200);
-  const idUsuarioActor = parseOptionalBigInt(req.jwtPayload?.id_usuario);
+  const idUsuarioActor = parseOptionalBigInt(req.authnClaims?.id_usuario);
   if (!idUsuarioActor) {
     res.status(401).json({ error: "Token invalido: usuario no identificado" });
     return;
@@ -1345,19 +1352,22 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
     return;
   }
 
-  let auth = null;
+  let authzContext = null;
   try {
-    auth = await resolveAuthContext(req);
+    authzContext = await resolveAuthzContext(req);
   } catch (error) {
     next(error);
     return;
   }
 
-  const canDescartarByRole = hasAnyRole(auth, ["autorizador", "administrador"]);
-  if (!canDescartarByRole && !hasAnyPermission(auth, ["fletes.sap.descartar", "mantenedores.admin"])) {
+  const canDescartarByRole = hasAnyRole(authzContext, ["autorizador", "administrador"]);
+  if (
+    !canDescartarByRole &&
+    !hasAnyPermission(authzContext, ["fletes.sap.descartar", "mantenedores.admin"])
+  ) {
     res.status(403).json({
       error: "No tienes permisos para descartar ingresos SAP",
-      role: auth?.primaryRole || null,
+      role: authzContext?.primaryRole || null,
     });
     return;
   }
@@ -1368,7 +1378,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/descartar", async (req, res, 
     return;
   }
   const motivoFinal = motivo.slice(0, 200);
-  const idUsuarioActor = parseOptionalBigInt(req.jwtPayload?.id_usuario);
+  const idUsuarioActor = parseOptionalBigInt(req.authnClaims?.id_usuario);
   if (!idUsuarioActor) {
     res.status(401).json({ error: "Token invalido: usuario no identificado" });
     return;
@@ -1494,24 +1504,27 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/restaurar", async (req, res, 
     return;
   }
 
-  let auth = null;
+  let authzContext = null;
   try {
-    auth = await resolveAuthContext(req);
+    authzContext = await resolveAuthzContext(req);
   } catch (error) {
     next(error);
     return;
   }
 
-  const canRestaurarByRole = hasAnyRole(auth, ["autorizador", "administrador"]);
-  if (!canRestaurarByRole && !hasAnyPermission(auth, ["fletes.sap.descartar", "mantenedores.admin"])) {
+  const canRestaurarByRole = hasAnyRole(authzContext, ["autorizador", "administrador"]);
+  if (
+    !canRestaurarByRole &&
+    !hasAnyPermission(authzContext, ["fletes.sap.descartar", "mantenedores.admin"])
+  ) {
     res.status(403).json({
       error: "No tienes permisos para restaurar ingresos SAP",
-      role: auth?.primaryRole || null,
+      role: authzContext?.primaryRole || null,
     });
     return;
   }
 
-  const idUsuarioActor = parseOptionalBigInt(req.jwtPayload?.id_usuario);
+  const idUsuarioActor = parseOptionalBigInt(req.authnClaims?.id_usuario);
 
   try {
     const pool = await getPool();

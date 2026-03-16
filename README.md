@@ -1,4 +1,4 @@
-﻿# cfl-back
+# cfl-back
 
 Backend base del proyecto de control de fletes.
 
@@ -6,6 +6,17 @@ Backend base del proyecto de control de fletes.
 
 `cfl-back` usa el archivo centralizado `cfl-infra/.env`.
 No se usa `.env` local dentro de `cfl-back`.
+
+Variables relevantes:
+
+- `PORT`
+- `CORS_ORIGIN`
+- `AUTHN_JWT_SECRET`
+- `DB_HOST`
+- `DB_PORT`
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_NAME`
 
 ## Levantar en local
 
@@ -25,6 +36,8 @@ API disponible en `http://localhost:4000`.
 ## Endpoints principales
 
 - `GET /health`
+- `POST /api/authn/login`
+- `GET /api/authn/context`
 - `GET /api/dashboard/resumen`
 - `GET /api/dashboard/fletes/no-ingresados`
 - `GET /api/mantenedores/resumen`

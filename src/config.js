@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const DEFAULT_DB_PORT = 1433;
+const DEFAULT_AUTHN_JWT_SECRET = "cfl-dev-secret";
 
 function parseEnvValue(raw) {
   const value = raw.trim();
@@ -62,6 +63,9 @@ const config = {
     port: toNumber(process.env.PORT, 4000),
     corsOrigin: process.env.CORS_ORIGIN || "*",
   },
+  authn: {
+    jwtSecret: process.env.AUTHN_JWT_SECRET || DEFAULT_AUTHN_JWT_SECRET,
+  },
   db: {
     host: process.env.DB_HOST,
     port: toNumber(process.env.DB_PORT, DEFAULT_DB_PORT),
@@ -70,6 +74,16 @@ const config = {
     database: process.env.DB_NAME,
   },
 };
+
+if (
+  config.authn.jwtSecret === DEFAULT_AUTHN_JWT_SECRET &&
+  config.app.env === "production"
+) {
+  console.error(
+    "[SEGURIDAD] AUTHN_JWT_SECRET no esta configurado. Se esta usando el secreto de desarrollo en produccion. " +
+      "Configura la variable de entorno AUTHN_JWT_SECRET con un valor seguro."
+  );
+}
 
 module.exports = {
   config,

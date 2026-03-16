@@ -48,7 +48,7 @@ function shouldAuditRequest(req) {
     return false;
   }
 
-  if (path === "/api/auth/context") {
+  if (path === "/api/authn/context") {
     return false;
   }
 
@@ -76,8 +76,8 @@ function deriveEntity(req) {
     resourceName = segments[3];
   }
 
-  if (moduleName === "auth") {
-    return "auth";
+  if (moduleName === "authn") {
+    return "authn";
   }
 
   if (moduleName === "mantenedores" && resourceName === "transportistas") {
@@ -96,7 +96,7 @@ function deriveAction(req) {
   }
 
   const path = normalizePath(req.originalUrl || req.url);
-  if (path === "/api/auth/login") {
+  if (path === "/api/authn/login") {
     return "login";
   }
 
@@ -284,8 +284,10 @@ function resolveUserId(req) {
     return Number.isInteger(explicit) && explicit > 0 ? explicit : null;
   }
 
-  const byJwt = Number(req.jwtPayload?.id_usuario);
-  return Number.isInteger(byJwt) && byJwt > 0 ? byJwt : null;
+  const byAuthnClaims = Number(req.authnClaims?.id_usuario);
+  return Number.isInteger(byAuthnClaims) && byAuthnClaims > 0
+    ? byAuthnClaims
+    : null;
 }
 
 async function insertAuditRow({ idUsuario, action, entity, entityId, summary, ipAddress }) {

@@ -1,7 +1,7 @@
 const express = require("express");
 const { getPool } = require("../db");
 const { clamp, parsePositiveInt } = require("../utils/parse");
-const { hasAnyPermission, resolveAuthContext } = require("../authz");
+const { hasAnyPermission, resolveAuthzContext } = require("../authz");
 
 const router = express.Router();
 
@@ -35,20 +35,20 @@ function uniqueBy(rows, keyName) {
   return output;
 }
 
-function buildPermissions(auth) {
+function buildPermissions(authzContext) {
   return {
     can_edit_facturas:
-      hasAnyPermission(auth, ["facturas.editar", "facturas.conciliar"]) ||
-      String(auth?.primaryRole || "").toLowerCase() === "administrador",
+      hasAnyPermission(authzContext, ["facturas.editar", "facturas.conciliar"]) ||
+      String(authzContext?.primaryRole || "").toLowerCase() === "administrador",
     can_generate_planillas:
-      hasAnyPermission(auth, ["planillas.generar"]) ||
-      String(auth?.primaryRole || "").toLowerCase() === "administrador",
+      hasAnyPermission(authzContext, ["planillas.generar"]) ||
+      String(authzContext?.primaryRole || "").toLowerCase() === "administrador",
   };
 }
 
 router.get("/facturas/overview", async (req, res, next) => {
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const pool = await getPool();
 
     const summaryResult = await pool.request().query(`
@@ -251,7 +251,7 @@ router.get("/facturas/overview", async (req, res, next) => {
         facturas: facturasResult.recordset,
         folios_disponibles: eligibleFoliosResult.recordset,
       },
-      permissions: buildPermissions(auth),
+      permissions: buildPermissions(authzContext),
       generated_at: new Date().toISOString(),
     });
   } catch (error) {
@@ -267,7 +267,7 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
   }
 
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const pool = await getPool();
 
     const folioResult = await pool.request().input("idFolio", idFolio).query(`
@@ -391,7 +391,7 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
             monto_total: existingFactura.monto_total,
           },
         },
-        permissions: buildPermissions(auth),
+        permissions: buildPermissions(authzContext),
         generated_at: new Date().toISOString(),
       });
       return;
@@ -460,7 +460,7 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
           monto_total: montoTotal,
         },
       },
-      permissions: buildPermissions(auth),
+      permissions: buildPermissions(authzContext),
       generated_at: new Date().toISOString(),
     });
   } catch (error) {
@@ -470,7 +470,7 @@ router.get("/facturas/folios/:idFolio", async (req, res, next) => {
 
 router.get("/planillas-sap/overview", async (req, res, next) => {
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const pool = await getPool();
 
     const invoicesResult = await pool.request().query(`
@@ -567,7 +567,7 @@ router.get("/planillas-sap/overview", async (req, res, next) => {
         },
         grupos: normalizedGroups,
       },
-      permissions: buildPermissions(auth),
+      permissions: buildPermissions(authzContext),
       generated_at: new Date().toISOString(),
     });
   } catch (error) {

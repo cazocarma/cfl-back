@@ -7,6 +7,7 @@ function normalizeText(value) {
   if (value === null || value === undefined) {
     return null;
   }
+
   const normalized = String(value).trim();
   return normalized.length > 0 ? normalized : null;
 }
@@ -32,7 +33,7 @@ function setCached(key, value) {
   });
 }
 
-function hydrateAuthContext(rows, source) {
+function hydrateAuthzContext(rows, source) {
   if (!rows || rows.length === 0) {
     return null;
   }
@@ -62,7 +63,7 @@ function hydrateAuthContext(rows, source) {
   };
 }
 
-async function fetchAuthByRoleName(roleName) {
+async function fetchAuthzContextByRoleName(roleName) {
   const normalizedRole = normalizeText(roleName);
   if (!normalizedRole) return null;
 
@@ -86,12 +87,12 @@ async function fetchAuthByRoleName(roleName) {
   `;
 
   const result = await pool.request().input("roleName", normalizedRole).query(query);
-  const context = hydrateAuthContext(result.recordset, "role_name");
-  if (context) setCached(cacheKey, context);
-  return context;
+  const authzContext = hydrateAuthzContext(result.recordset, "role_name");
+  if (authzContext) setCached(cacheKey, authzContext);
+  return authzContext;
 }
 
-async function fetchAuthByUserId(userId) {
+async function fetchAuthzContextByUserId(userId) {
   const parsedUserId = Number(userId);
   if (!Number.isInteger(parsedUserId) || parsedUserId <= 0) return null;
 
@@ -121,12 +122,12 @@ async function fetchAuthByUserId(userId) {
   `;
 
   const result = await pool.request().input("userId", parsedUserId).query(query);
-  const context = hydrateAuthContext(result.recordset, "user_id");
-  if (context) setCached(cacheKey, context);
-  return context;
+  const authzContext = hydrateAuthzContext(result.recordset, "user_id");
+  if (authzContext) setCached(cacheKey, authzContext);
+  return authzContext;
 }
 
-async function fetchAuthByUsername(username) {
+async function fetchAuthzContextByUsername(username) {
   const normalizedUsername = normalizeText(username);
   if (!normalizedUsername) return null;
 
@@ -156,65 +157,80 @@ async function fetchAuthByUsername(username) {
   `;
 
   const result = await pool.request().input("username", normalizedUsername).query(query);
-  const context = hydrateAuthContext(result.recordset, "username");
-  if (context) setCached(cacheKey, context);
-  return context;
+  const authzContext = hydrateAuthzContext(result.recordset, "username");
+  if (authzContext) setCached(cacheKey, authzContext);
+  return authzContext;
 }
 
-async function resolveAuthContext(req) {
-  // Prioridad máxima: payload JWT verificado por el middleware
-  if (req.jwtPayload) {
-    const byJwt = await fetchAuthByUserId(req.jwtPayload.id_usuario);
-    if (byJwt) return byJwt;
-    // Fallback: resolver por nombre de rol del token si no hay contexto de usuario
-    const byRole = await fetchAuthByRoleName(req.jwtPayload.role);
-    if (byRole) return byRole;
+async function resolveAuthzContext(req) {
+  if (req.authnClaims) {
+    const byAuthnUser = await fetchAuthzContextByUserId(req.authnClaims.id_usuario);
+    if (byAuthnUser) return byAuthnUser;
+
+    const byAuthnRole = await fetchAuthzContextByRoleName(req.authnClaims.role);
+    if (byAuthnRole) return byAuthnRole;
   }
 
-  const roleName = normalizeText(req.header("x-cfl-role") || req.header("x-user-role") || req.query.role);
-  const userId = normalizeText(req.header("x-cfl-user-id") || req.header("x-user-id") || req.query.user_id);
-  const username = normalizeText(req.header("x-cfl-username") || req.header("x-username") || req.query.username);
+  const roleName = normalizeText(
+    req.header("x-cfl-role") || req.header("x-user-role") || req.query.role
+  );
+  const userId = normalizeText(
+    req.header("x-cfl-user-id") ||
+      req.header("x-user-id") ||
+      req.query.user_id
+  );
+  const username = normalizeText(
+    req.header("x-cfl-username") ||
+      req.header("x-username") ||
+      req.query.username
+  );
 
   if (userId) {
-    const byUserId = await fetchAuthByUserId(userId);
+    const byUserId = await fetchAuthzContextByUserId(userId);
     if (byUserId) return byUserId;
   }
 
   if (username) {
-    const byUsername = await fetchAuthByUsername(username);
+    const byUsername = await fetchAuthzContextByUsername(username);
     if (byUsername) return byUsername;
   }
 
   if (roleName) {
-    const byRole = await fetchAuthByRoleName(roleName);
+    const byRole = await fetchAuthzContextByRoleName(roleName);
     if (byRole) return byRole;
   }
 
   return null;
 }
 
-function hasPermission(context, permissionKey) {
-  if (!context || !permissionKey) {
+function hasPermission(authzContext, permissionKey) {
+  if (!authzContext || !permissionKey) {
     return false;
   }
-  return context.permissions.has(String(permissionKey).toLowerCase());
+
+  return authzContext.permissions.has(String(permissionKey).toLowerCase());
 }
 
-function hasAnyPermission(context, permissionKeys) {
-  if (!context || !Array.isArray(permissionKeys) || permissionKeys.length === 0) {
+function hasAnyPermission(authzContext, permissionKeys) {
+  if (
+    !authzContext ||
+    !Array.isArray(permissionKeys) ||
+    permissionKeys.length === 0
+  ) {
     return false;
   }
 
   for (const key of permissionKeys) {
-    if (hasPermission(context, key)) {
+    if (hasPermission(authzContext, key)) {
       return true;
     }
   }
+
   return false;
 }
 
 module.exports = {
-  resolveAuthContext,
+  resolveAuthzContext,
   hasPermission,
   hasAnyPermission,
 };

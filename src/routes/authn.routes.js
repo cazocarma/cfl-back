@@ -1,0 +1,127 @@
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { getPool } = require("../db");
+const { config } = require("../config");
+const { resolveAuthzContext } = require("../authz");
+const {
+  authnLoginRateLimitMiddleware,
+} = require("../middleware/authn-login-rate-limit.middleware");
+
+const authnRouter = express.Router();
+
+authnRouter.get("/context", async (req, res, next) => {
+  try {
+    const authzContext = await resolveAuthzContext(req);
+    if (!authzContext) {
+      res.status(403).json({
+        error: "No se pudo resolver el contexto de autorización",
+      });
+      return;
+    }
+
+    res.json({
+      data: {
+        role: authzContext.primaryRole,
+        roles: authzContext.roleNames,
+        permissions: Array.from(authzContext.permissions).sort(),
+        source: authzContext.source,
+      },
+      generated_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/authn/login
+ * Autentica con email + password; devuelve token JWT de 8h.
+ */
+authnRouter.post(
+  "/login",
+  authnLoginRateLimitMiddleware,
+  async (req, res, next) => {
+    try {
+      const email = String(req.body?.email || "").trim();
+      const password = String(req.body?.password || "");
+
+      if (!email || !password) {
+        return res
+          .status(400)
+          .json({ error: "Email y contraseña son requeridos" });
+      }
+
+      const pool = await getPool();
+
+      const userResult = await pool.request().input("email", email).query(`
+        SELECT IdUsuario, Username, Email, Nombre, Apellido, PasswordHash
+        FROM [cfl].[Usuario]
+        WHERE Email = @email
+          AND Activo = 1;
+      `);
+
+      const user = userResult.recordset[0] || null;
+      const invalidCredentialsMessage = "Credenciales incorrectas";
+
+      if (!user) {
+        return res.status(401).json({ error: invalidCredentialsMessage });
+      }
+
+      const passwordIsValid = await bcrypt.compare(password, user.PasswordHash);
+      if (!passwordIsValid) {
+        return res.status(401).json({ error: invalidCredentialsMessage });
+      }
+
+      const roleResult = await pool.request().input("userId", user.IdUsuario)
+        .query(`
+        SELECT TOP 1 r.Nombre AS role_nombre
+        FROM [cfl].[UsuarioRol] ur
+        INNER JOIN [cfl].[Rol] r ON r.IdRol = ur.IdRol AND r.Activo = 1
+        WHERE ur.IdUsuario = @userId
+        ORDER BY r.Nombre ASC;
+      `);
+
+      const primaryRole = roleResult.recordset[0]?.role_nombre || null;
+
+      const authnClaims = {
+        id_usuario: Number(user.IdUsuario),
+        username: user.Username,
+        email: user.Email,
+        nombre: user.Nombre || null,
+        apellido: user.Apellido || null,
+        role: primaryRole,
+      };
+
+      const token = jwt.sign(authnClaims, config.authn.jwtSecret, {
+        expiresIn: "8h",
+      });
+
+      req.auditContext = {
+        userId: authnClaims.id_usuario,
+        action: "login",
+        entity: "authn",
+        idEntidad: authnClaims.id_usuario,
+        summary: `Inicio de sesion exitoso para ${authnClaims.username}`,
+      };
+
+      return res.json({
+        token,
+        user: {
+          id_usuario: authnClaims.id_usuario,
+          username: authnClaims.username,
+          email: authnClaims.email,
+          nombre: authnClaims.nombre,
+          apellido: authnClaims.apellido,
+          role: authnClaims.role,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+module.exports = {
+  authnRouter,
+};

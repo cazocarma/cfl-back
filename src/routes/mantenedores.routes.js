@@ -2,7 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const { getPool } = require("../db");
 const { MAINTAINERS } = require("../mantenedores-config");
-const { hasAnyPermission, resolveAuthContext } = require("../authz");
+const { hasAnyPermission, resolveAuthzContext } = require("../authz");
 const { normalizeLifecycleStatus } = require("../utils/lifecycle");
 
 const router = express.Router();
@@ -217,14 +217,19 @@ async function fetchEntityById(pool, entityConfig, id) {
 
 async function ensureCanWrite(req, res, entityKey) {
   const permissionEntityKey = normalizePermissionEntityKey(entityKey);
-  const auth = await resolveAuthContext(req);
-  if (hasAnyPermission(auth, maintainerWritePermissions(permissionEntityKey))) {
-    return auth;
+  const authzContext = await resolveAuthzContext(req);
+  if (
+    hasAnyPermission(
+      authzContext,
+      maintainerWritePermissions(permissionEntityKey)
+    )
+  ) {
+    return authzContext;
   }
 
   res.status(403).json({
     error: "No tienes permisos para modificar este mantenedor",
-    role: auth?.primaryRole || null,
+    role: authzContext?.primaryRole || null,
     entity: entityKey,
   });
 
@@ -399,11 +404,11 @@ router.get("/folios/:id/movimientos", async (req, res, next) => {
   }
 
   try {
-    const auth = await resolveAuthContext(req);
-    if (!hasAnyPermission(auth, maintainerReadPermissions("folios"))) {
+    const authzContext = await resolveAuthzContext(req);
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions("folios"))) {
       res.status(403).json({
         error: "No tienes permisos para consultar movimientos de folio",
-        role: auth?.primaryRole || null,
+        role: authzContext?.primaryRole || null,
       });
       return;
     }
@@ -470,8 +475,8 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "folios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "folios");
+    if (!authzContext) return;
 
     const pool = await getPool();
     const folio = await fetchFolioEstado(pool, idFolio);
@@ -544,7 +549,7 @@ router.post("/folios/:id/movimientos/asignar-sap", async (req, res, next) => {
 
     res.status(201).json({
       message: "Movimiento asignado al folio",
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: {
         id_folio: idFolio,
         id_cabecera_flete: Number(target.IdCabeceraFlete),
@@ -571,8 +576,8 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "folios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "folios");
+    if (!authzContext) return;
 
     const pool = await getPool();
     const folio = await fetchFolioEstado(pool, idFolio);
@@ -646,7 +651,7 @@ router.patch("/folios/:id/movimientos/:id_cabecera_flete/desasignar", async (req
 
     res.json({
       message: "Movimiento desasignado (folio 0)",
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: {
         id_cabecera_flete: idCabeceraFlete,
         id_folio: defaultFolioId,
@@ -666,8 +671,8 @@ router.patch("/folios/:id/bloqueo", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "folios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "folios");
+    if (!authzContext) return;
 
     const pool = await getPool();
     const folio = await fetchFolioEstado(pool, id);
@@ -705,7 +710,7 @@ router.patch("/folios/:id/bloqueo", async (req, res, next) => {
     const updatedRow = await fetchEntityById(pool, getEntityConfig("folios"), id);
     res.json({
       message: `Folio ${nuevoBloqueado ? "bloqueado" : "desbloqueado"}`,
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: updatedRow,
     });
   } catch (error) {
@@ -716,9 +721,12 @@ router.patch("/folios/:id/bloqueo", async (req, res, next) => {
 // ── Temporada activa ─────────────────────────────────────────────────────────
 router.get("/temporadas/activa", async (req, res, next) => {
   try {
-    const auth = await resolveAuthContext(req);
-    if (!hasAnyPermission(auth, maintainerReadPermissions("temporadas"))) {
-      res.status(403).json({ error: "Sin permisos para consultar temporadas", role: auth?.primaryRole || null });
+    const authzContext = await resolveAuthzContext(req);
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions("temporadas"))) {
+      res.status(403).json({
+        error: "Sin permisos para consultar temporadas",
+        role: authzContext?.primaryRole || null,
+      });
       return;
     }
 
@@ -748,9 +756,13 @@ router.get("/tarifas", async (req, res, next) => {
   const entityConfig = MAINTAINERS["tarifas"];
 
   try {
-    const auth = await resolveAuthContext(req);
-    if (!hasAnyPermission(auth, maintainerReadPermissions("tarifas"))) {
-      res.status(403).json({ error: "Sin permisos para consultar tarifas", role: auth?.primaryRole || null, entity: "tarifas" });
+    const authzContext = await resolveAuthzContext(req);
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions("tarifas"))) {
+      res.status(403).json({
+        error: "Sin permisos para consultar tarifas",
+        role: authzContext?.primaryRole || null,
+        entity: "tarifas",
+      });
       return;
     }
 
@@ -792,9 +804,9 @@ router.get("/tarifas", async (req, res, next) => {
       total: result.recordset.length,
       temporada_id: temporadaId || null,
       permissions: {
-        role: auth.primaryRole,
+        role: authzContext.primaryRole,
         can_view: true,
-        can_edit: hasAnyPermission(auth, maintainerWritePermissions("tarifas")),
+        can_edit: hasAnyPermission(authzContext, maintainerWritePermissions("tarifas")),
       },
     });
   } catch (error) {
@@ -811,9 +823,12 @@ router.get("/usuarios/:id/roles", async (req, res, next) => {
   }
 
   try {
-    const auth = await resolveAuthContext(req);
-    if (!hasAnyPermission(auth, maintainerReadPermissions("usuarios"))) {
-      res.status(403).json({ error: "Sin permisos para consultar usuarios", role: auth?.primaryRole || null });
+    const authzContext = await resolveAuthzContext(req);
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions("usuarios"))) {
+      res.status(403).json({
+        error: "Sin permisos para consultar usuarios",
+        role: authzContext?.primaryRole || null,
+      });
       return;
     }
 
@@ -847,8 +862,8 @@ router.post("/usuarios/:id/roles", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "usuarios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "usuarios");
+    if (!authzContext) return;
 
     const pool = await getPool();
 
@@ -896,8 +911,8 @@ router.delete("/usuarios/:id/roles/:id_rol", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "usuarios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "usuarios");
+    if (!authzContext) return;
 
     const pool = await getPool();
     const result = await pool.request()
@@ -934,8 +949,8 @@ router.patch("/usuarios/:id/estado", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "usuarios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "usuarios");
+    if (!authzContext) return;
 
     const pool = await getPool();
     const result = await pool.request()
@@ -963,8 +978,8 @@ router.patch("/usuarios/:id/estado", async (req, res, next) => {
 // Debe ir ANTES de router.post('/:entity') para sobreescribir el genérico
 router.post("/usuarios", async (req, res, next) => {
   try {
-    const auth = await ensureCanWrite(req, res, "usuarios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "usuarios");
+    if (!authzContext) return;
 
     const { username, email, password, nombre, apellido, activo, id_rol } = req.body || {};
 
@@ -1016,7 +1031,7 @@ router.post("/usuarios", async (req, res, next) => {
 
     res.status(201).json({
       message: "Usuario creado",
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: insertedRow || { IdUsuario: insertedId },
     });
   } catch (error) {
@@ -1034,8 +1049,8 @@ router.put("/usuarios/:id", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, "usuarios");
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, "usuarios");
+    if (!authzContext) return;
 
     const { username, email, password, nombre, apellido, activo, id_rol } = req.body || {};
     const now = new Date();
@@ -1111,7 +1126,7 @@ router.put("/usuarios/:id", async (req, res, next) => {
 
     res.json({
       message: "Usuario actualizado",
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: updatedRow,
     });
   } catch (error) {
@@ -1121,11 +1136,11 @@ router.put("/usuarios/:id", async (req, res, next) => {
 
 router.get("/resumen", async (req, res, next) => {
   try {
-    const auth = await resolveAuthContext(req);
-    if (!hasAnyPermission(auth, maintainerReadPermissions("resumen"))) {
+    const authzContext = await resolveAuthzContext(req);
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions("resumen"))) {
       res.status(403).json({
         error: "No tienes permisos para consultar mantenedores",
-        role: auth?.primaryRole || null,
+        role: authzContext?.primaryRole || null,
       });
       return;
     }
@@ -1148,7 +1163,7 @@ router.get("/resumen", async (req, res, next) => {
 
     res.json({
       data: summary,
-      role: auth?.primaryRole || null,
+      role: authzContext?.primaryRole || null,
       generated_at: new Date().toISOString(),
     });
   } catch (error) {
@@ -1159,12 +1174,12 @@ router.get("/resumen", async (req, res, next) => {
 // Compatibilidad dedicada para catalogo critico de bandeja y mantenedor
 router.get("/tipos-flete", async (req, res, next) => {
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const permissionEntityKey = normalizePermissionEntityKey("tipos-flete");
-    if (!hasAnyPermission(auth, maintainerReadPermissions(permissionEntityKey))) {
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions(permissionEntityKey))) {
       res.status(403).json({
         error: "No tienes permisos para consultar este mantenedor",
-        role: auth?.primaryRole || null,
+        role: authzContext?.primaryRole || null,
         entity: "tipos-flete",
       });
       return;
@@ -1177,9 +1192,9 @@ router.get("/tipos-flete", async (req, res, next) => {
       data: rows,
       total: rows.length,
       permissions: {
-        role: auth.primaryRole,
+        role: authzContext.primaryRole,
         can_view: true,
-        can_edit: hasAnyPermission(auth, maintainerWritePermissions(permissionEntityKey)),
+        can_edit: hasAnyPermission(authzContext, maintainerWritePermissions(permissionEntityKey)),
       },
     });
   } catch (error) {
@@ -1196,12 +1211,12 @@ router.get("/:entity", async (req, res, next) => {
   const entityKey = req.params.entity;
 
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const permissionEntityKey = normalizePermissionEntityKey(entityKey);
-    if (!hasAnyPermission(auth, maintainerReadPermissions(permissionEntityKey))) {
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions(permissionEntityKey))) {
       res.status(403).json({
         error: "No tienes permisos para consultar este mantenedor",
-        role: auth?.primaryRole || null,
+        role: authzContext?.primaryRole || null,
         entity: entityKey,
       });
       return;
@@ -1219,9 +1234,9 @@ router.get("/:entity", async (req, res, next) => {
       data: result.recordset,
       total: result.recordset.length,
       permissions: {
-        role: auth.primaryRole,
+        role: authzContext.primaryRole,
         can_view: true,
-        can_edit: hasAnyPermission(auth, maintainerWritePermissions(permissionEntityKey)),
+        can_edit: hasAnyPermission(authzContext, maintainerWritePermissions(permissionEntityKey)),
       },
     });
   } catch (error) {
@@ -1240,12 +1255,12 @@ router.get("/:entity/:id", async (req, res, next) => {
   if (id === null) return;
 
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const permissionEntityKey = normalizePermissionEntityKey(req.params.entity);
-    if (!hasAnyPermission(auth, maintainerReadPermissions(permissionEntityKey))) {
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions(permissionEntityKey))) {
       res.status(403).json({
         error: "No tienes permisos para consultar este mantenedor",
-        role: auth?.primaryRole || null,
+        role: authzContext?.primaryRole || null,
         entity: req.params.entity,
       });
       return;
@@ -1261,9 +1276,9 @@ router.get("/:entity/:id", async (req, res, next) => {
     res.json({
       data: row,
       permissions: {
-        role: auth.primaryRole,
+        role: authzContext.primaryRole,
         can_view: true,
-        can_edit: hasAnyPermission(auth, maintainerWritePermissions(permissionEntityKey)),
+        can_edit: hasAnyPermission(authzContext, maintainerWritePermissions(permissionEntityKey)),
       },
     });
   } catch (error) {
@@ -1283,12 +1298,12 @@ router.get("/:entity/:id/relaciones", async (req, res, next) => {
   }
 
   try {
-    const auth = await resolveAuthContext(req);
+    const authzContext = await resolveAuthzContext(req);
     const permissionEntityKey = normalizePermissionEntityKey(req.params.entity);
-    if (!hasAnyPermission(auth, maintainerReadPermissions(permissionEntityKey))) {
+    if (!hasAnyPermission(authzContext, maintainerReadPermissions(permissionEntityKey))) {
       res.status(403).json({
         error: "No tienes permisos para consultar relaciones",
-        role: auth?.primaryRole || null,
+        role: authzContext?.primaryRole || null,
         entity: req.params.entity,
       });
       return;
@@ -1323,8 +1338,8 @@ router.post("/:entity", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, req.params.entity);
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, req.params.entity);
+    if (!authzContext) return;
 
     const allowedFields = [...entityConfig.create.required, ...entityConfig.create.optional];
     const payload = collectPayload(req.body || {}, allowedFields);
@@ -1373,7 +1388,7 @@ router.post("/:entity", async (req, res, next) => {
 
     res.status(201).json({
       message: `${entityConfig.title} creado`,
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: insertedRow || { [entityConfig.idColumn]: insertedId },
     });
   } catch (error) {
@@ -1393,8 +1408,8 @@ router.put("/:entity/:id", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, req.params.entity);
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, req.params.entity);
+    if (!authzContext) return;
 
     const payload = collectPayload(req.body || {}, entityConfig.update.allowed);
 
@@ -1453,7 +1468,7 @@ router.put("/:entity/:id", async (req, res, next) => {
     const updatedRow = await fetchEntityById(pool, entityConfig, id);
     res.json({
       message: `${entityConfig.title} actualizado`,
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       data: updatedRow,
     });
   } catch (error) {
@@ -1473,8 +1488,8 @@ router.delete("/:entity/:id", async (req, res, next) => {
   }
 
   try {
-    const auth = await ensureCanWrite(req, res, req.params.entity);
-    if (!auth) return;
+    const authzContext = await ensureCanWrite(req, res, req.params.entity);
+    if (!authzContext) return;
 
     const pool = await getPool();
     if (req.params.entity === "folios") {
@@ -1529,7 +1544,7 @@ router.delete("/:entity/:id", async (req, res, next) => {
 
     res.json({
       message: `${entityConfig.title} eliminado`,
-      role: auth.primaryRole,
+      role: authzContext.primaryRole,
       id,
     });
   } catch (error) {

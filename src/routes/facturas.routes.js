@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { getPool, sql } = require('../db');
-const { resolveAuthContext, hasAnyPermission } = require('../authz');
+const { resolveAuthzContext, hasAnyPermission } = require('../authz');
 const { parsePositiveInt } = require('../utils/parse');
 
 const router = express.Router();
@@ -25,10 +25,10 @@ function calcMontos(movimientos) {
 
 /** Verifica que el usuario tenga permiso de facturación o sea administrador. */
 async function checkFacturacionPerm(req) {
-  const auth = await resolveAuthContext(req);
-  const isAdmin = String(auth?.primaryRole || '').toLowerCase() === 'administrador';
-  const hasPerm = hasAnyPermission(auth, ['facturacion', 'facturas.editar', 'facturas.generar']);
-  return { auth, allowed: isAdmin || hasPerm };
+  const authzContext = await resolveAuthzContext(req);
+  const isAdmin = String(authzContext?.primaryRole || '').toLowerCase() === 'administrador';
+  const hasPerm = hasAnyPermission(authzContext, ['facturacion', 'facturas.editar', 'facturas.generar']);
+  return { authzContext, allowed: isAdmin || hasPerm };
 }
 
 /**
