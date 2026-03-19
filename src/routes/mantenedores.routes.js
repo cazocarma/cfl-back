@@ -4,6 +4,8 @@ const { getPool } = require("../db");
 const { MAINTAINERS } = require("../mantenedores-config");
 const { hasAnyPermission, resolveAuthzContext } = require("../authz");
 const { normalizeLifecycleStatus } = require("../utils/lifecycle");
+const { validate } = require("../middleware/validate.middleware");
+const { crearUsuarioBody, actualizarUsuarioBody } = require("../schemas/usuarios.schemas");
 
 const router = express.Router();
 
@@ -150,6 +152,7 @@ async function fetchTiposFleteRows(pool) {
       WHERE i.IdTipoFlete = t.IdTipoFlete
         AND i.Activo = 1
     ) im
+    WHERE t.Activo = 1
     ORDER BY t.Nombre ASC;
   `;
 
@@ -787,13 +790,14 @@ router.get("/tarifas", async (req, res, next) => {
       sql = `
         SELECT ${entityConfig.listColumns.join(", ")}
         FROM ${buildBaseFrom(entityConfig)}
-        WHERE t.IdTemporada = @temporadaId
+        WHERE t.IdTemporada = @temporadaId AND t.Activo = 1
         ORDER BY ${entityConfig.orderBy};
       `;
     } else {
       sql = `
         SELECT ${entityConfig.listColumns.join(", ")}
         FROM ${buildBaseFrom(entityConfig)}
+        WHERE t.Activo = 1
         ORDER BY ${entityConfig.orderBy};
       `;
     }
@@ -837,7 +841,7 @@ router.get("/usuarios/:id/roles", async (req, res, next) => {
       SELECT r.IdRol, r.Nombre, r.Descripcion, r.Activo
       FROM [cfl].[UsuarioRol] ur
       INNER JOIN [cfl].[Rol] r ON r.IdRol = ur.IdRol
-      WHERE ur.IdUsuario = @id
+      WHERE ur.IdUsuario = @id AND r.Activo = 1
       ORDER BY r.Nombre ASC;
     `);
 
@@ -976,7 +980,7 @@ router.patch("/usuarios/:id/estado", async (req, res, next) => {
 
 // ── Usuarios: crear con hash bcrypt ──────────────────────────────────────────
 // Debe ir ANTES de router.post('/:entity') para sobreescribir el genérico
-router.post("/usuarios", async (req, res, next) => {
+router.post("/usuarios", validate({ body: crearUsuarioBody }), async (req, res, next) => {
   try {
     const authzContext = await ensureCanWrite(req, res, "usuarios");
     if (!authzContext) return;
@@ -1041,7 +1045,7 @@ router.post("/usuarios", async (req, res, next) => {
 
 // ── Usuarios: editar con hash bcrypt opcional ─────────────────────────────────
 // Debe ir ANTES de router.put('/:entity/:id') para sobreescribir el genérico
-router.put("/usuarios/:id", async (req, res, next) => {
+router.put("/usuarios/:id", validate({ body: actualizarUsuarioBody }), async (req, res, next) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: "ID de usuario inválido" });
@@ -1150,9 +1154,12 @@ router.get("/resumen", async (req, res, next) => {
     // Ejecuta todos los COUNT en paralelo en lugar de secuencialmente (evita N+1)
     const entries = Object.entries(MAINTAINERS);
     const counts = await Promise.all(
-      entries.map(([, entityConfig]) =>
-        pool.request().query(`SELECT COUNT_BIG(1) AS total FROM ${entityConfig.table};`)
-      )
+      entries.map(([, entityConfig]) => {
+        const where = entityConfig.softDeleteColumn
+          ? `WHERE ${entityConfig.softDeleteColumn} = 1`
+          : "";
+        return pool.request().query(`SELECT COUNT_BIG(1) AS total FROM ${entityConfig.table} ${where};`);
+      })
     );
 
     const summary = entries.map(([key, entityConfig], index) => ({
@@ -1223,9 +1230,20 @@ router.get("/:entity", async (req, res, next) => {
     }
 
     const pool = await getPool();
+    const activoParam = String(req.query.activo || "si").toLowerCase();
+    let activeFilter = "";
+    if (entityConfig.softDeleteColumn) {
+      if (activoParam === "si") {
+        activeFilter = `WHERE ${entityConfig.alias}.${entityConfig.softDeleteColumn} = 1`;
+      } else if (activoParam === "no") {
+        activeFilter = `WHERE ${entityConfig.alias}.${entityConfig.softDeleteColumn} = 0`;
+      }
+      // "todos" → sin filtro
+    }
     const sql = `
       SELECT ${entityConfig.listColumns.join(", ")}
       FROM ${buildBaseFrom(entityConfig)}
+      ${activeFilter}
       ORDER BY ${entityConfig.orderBy};
     `;
 

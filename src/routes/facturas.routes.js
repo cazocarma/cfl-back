@@ -4,6 +4,15 @@ const express = require('express');
 const { getPool, sql } = require('../db');
 const { resolveAuthzContext, hasAnyPermission } = require('../authz');
 const { parsePositiveInt } = require('../utils/parse');
+const { validate } = require('../middleware/validate.middleware');
+const {
+  previewBody,
+  generarBody,
+  agregarFoliosBody,
+  actualizarFacturaBody,
+  cambiarEstadoBody,
+  idParam,
+} = require('../schemas/facturas.schemas');
 
 const router = express.Router();
 
@@ -80,6 +89,7 @@ async function computePreview(pool, idEmpresa, idsFolio, criterio) {
     SELECT
       cf.IdCabeceraFlete,
       cf.IdFolio,
+      fol.FolioNumero,
       cf.SapNumeroEntrega,
       cf.NumeroEntrega,
       cf.GuiaRemision,
@@ -99,6 +109,7 @@ async function computePreview(pool, idEmpresa, idsFolio, criterio) {
       ),
       empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL)
     FROM [cfl].[CabeceraFlete] cf
+    LEFT JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
     LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
     LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
     LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
@@ -410,8 +421,8 @@ router.get('/folios-elegibles', async (req, res, next) => {
 // POST /facturas/preview
 // Calcula cuántas facturas se generarán antes de confirmar
 // ---------------------------------------------------------------------------
-router.post('/preview', async (req, res, next) => {
-  const { id_empresa, ids_folio, criterio } = req.body || {};
+router.post('/preview', validate({ body: previewBody }), async (req, res, next) => {
+  const { id_empresa, ids_folio, criterio } = req.body;
 
   if (!id_empresa || !Array.isArray(ids_folio) || ids_folio.length === 0) {
     res.status(400).json({ error: 'Faltan id_empresa o ids_folio' });
@@ -441,8 +452,8 @@ router.post('/preview', async (req, res, next) => {
 // POST /facturas/generar
 // Confirma generación: persiste facturas y marca fletes como FACTURADO
 // ---------------------------------------------------------------------------
-router.post('/generar', async (req, res, next) => {
-  const { id_empresa, ids_folio, criterio } = req.body || {};
+router.post('/generar', validate({ body: generarBody }), async (req, res, next) => {
+  const { id_empresa, ids_folio, criterio } = req.body;
 
   if (!id_empresa || !Array.isArray(ids_folio) || ids_folio.length === 0) {
     res.status(400).json({ error: 'Faltan id_empresa o ids_folio' });
@@ -455,7 +466,7 @@ router.post('/generar', async (req, res, next) => {
 
   const { allowed } = await checkFacturacionPerm(req);
   if (!allowed) {
-    res.status(403).json({ error: 'Sin permiso de facturación' });
+    res.status(403).json({ error: 'Sin permiso de pre facturación' });
     return;
   }
 
@@ -636,7 +647,7 @@ router.get('/:id', async (req, res, next) => {
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
     if (!factura) {
-      res.status(404).json({ error: 'Factura no encontrada' });
+      res.status(404).json({ error: 'Pre factura no encontrada' });
       return;
     }
     res.json({ data: factura });
@@ -648,8 +659,8 @@ router.get('/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /facturas/:id/folios — agregar folios a factura en Borrador
 // ---------------------------------------------------------------------------
-router.post('/:id/folios', async (req, res, next) => {
-  const idFactura = parsePositiveInt(req.params.id, 0);
+router.post('/:id/folios', validate({ params: idParam, body: agregarFoliosBody }), async (req, res, next) => {
+  const idFactura = req.params.id;
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
     return;
@@ -668,9 +679,9 @@ router.post('/:id/folios', async (req, res, next) => {
   try {
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Factura no encontrada' }); return; }
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
     if (factura.estado !== 'borrador') {
-      res.status(409).json({ error: 'Solo se pueden agregar folios a facturas en estado Borrador' });
+      res.status(409).json({ error: 'Solo se pueden agregar folios a pre facturas en estado Borrador' });
       return;
     }
 
@@ -732,9 +743,9 @@ router.delete('/:id/folios/:folio_id', async (req, res, next) => {
   try {
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Factura no encontrada' }); return; }
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
     if (factura.estado !== 'borrador') {
-      res.status(409).json({ error: 'Solo se pueden quitar folios de facturas en estado Borrador' });
+      res.status(409).json({ error: 'Solo se pueden quitar folios de pre facturas en estado Borrador' });
       return;
     }
 
@@ -773,8 +784,8 @@ router.delete('/:id/folios/:folio_id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /facturas/:id — editar cabecera (solo Borrador)
 // ---------------------------------------------------------------------------
-router.put('/:id', async (req, res, next) => {
-  const idFactura = parsePositiveInt(req.params.id, 0);
+router.put('/:id', validate({ params: idParam, body: actualizarFacturaBody }), async (req, res, next) => {
+  const idFactura = req.params.id;
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
     return;
@@ -789,9 +800,9 @@ router.put('/:id', async (req, res, next) => {
   try {
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Factura no encontrada' }); return; }
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
     if (factura.estado !== 'borrador') {
-      res.status(409).json({ error: 'Solo se puede editar una factura en estado Borrador' });
+      res.status(409).json({ error: 'Solo se puede editar una pre factura en estado Borrador' });
       return;
     }
 
@@ -813,7 +824,7 @@ router.put('/:id', async (req, res, next) => {
       `);
 
     await transaction.commit();
-    res.json({ message: 'Factura actualizada' });
+    res.json({ message: 'Pre factura actualizada' });
   } catch (err) {
     if (transaction) { try { await transaction.rollback(); } catch (_) {} }
     next(err);
@@ -824,8 +835,8 @@ router.put('/:id', async (req, res, next) => {
 // PATCH /facturas/:id/estado — transición de estado
 // Body: { estado: 'emitida' | 'anulada' }
 // ---------------------------------------------------------------------------
-router.patch('/:id/estado', async (req, res, next) => {
-  const idFactura = parsePositiveInt(req.params.id, 0);
+router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody }), async (req, res, next) => {
+  const idFactura = req.params.id;
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
     return;
@@ -844,15 +855,15 @@ router.patch('/:id/estado', async (req, res, next) => {
   try {
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Factura no encontrada' }); return; }
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
 
     // Validar transición de estado
     if (nuevoEstado === 'emitida' && factura.estado !== 'borrador') {
-      res.status(409).json({ error: 'Solo se puede emitir una factura en estado Borrador' });
+      res.status(409).json({ error: 'Solo se puede emitir una pre factura en estado Borrador' });
       return;
     }
     if (nuevoEstado === 'anulada' && factura.estado === 'anulada') {
-      res.status(409).json({ error: 'La factura ya está anulada' });
+      res.status(409).json({ error: 'La pre factura ya está anulada' });
       return;
     }
 
@@ -888,7 +899,7 @@ router.patch('/:id/estado', async (req, res, next) => {
     }
 
     await transaction.commit();
-    res.json({ message: `Factura ${nuevoEstado} exitosamente` });
+    res.json({ message: `Pre factura ${nuevoEstado} exitosamente` });
   } catch (err) {
     if (transaction) { try { await transaction.rollback(); } catch (_) {} }
     next(err);
@@ -906,13 +917,13 @@ router.get('/:id/export/excel', async (req, res, next) => {
     const ExcelJS = require('exceljs');
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Factura no encontrada' }); return; }
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
 
     const wb = new ExcelJS.Workbook();
     wb.creator = 'CFL System';
     wb.created = new Date();
 
-    // Hoja 1 — Cabecera de factura
+    // Hoja 1 — Cabecera de pre factura
     const shCab = wb.addWorksheet('Cabecera');
     // Agregar centros de costo y cuentas mayor desde los folios (valores únicos)
     const ccCodigos = [...new Set(
@@ -923,7 +934,7 @@ router.get('/:id/export/excel', async (req, res, next) => {
     )].join(', ') || '-';
 
     shCab.columns = [
-      { header: 'N° Factura',        key: 'numero_factura', width: 20 },
+      { header: 'N° Pre Factura',     key: 'numero_factura', width: 20 },
       { header: 'Empresa',           key: 'empresa_nombre', width: 30 },
       { header: 'RUT',               key: 'empresa_rut',    width: 15 },
       { header: 'Fecha Emisión',     key: 'fecha_emision',  width: 18 },
@@ -988,7 +999,7 @@ router.get('/:id/export/excel', async (req, res, next) => {
     totRow.font = { bold: true };
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="factura-${factura.numero_factura}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="pre-factura-${factura.numero_factura}.xlsx"`);
     await wb.xlsx.write(res);
     res.end();
   } catch (err) {
@@ -1007,11 +1018,11 @@ router.get('/:id/export/pdf', async (req, res, next) => {
     const PDFDocument = require('pdfkit');
     const pool = await getPool();
     const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Factura no encontrada' }); return; }
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
 
     const doc = new PDFDocument({ size: 'A4', margin: 50 });
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="factura-${factura.numero_factura}.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="pre-factura-${factura.numero_factura}.pdf"`);
     doc.pipe(res);
 
     const CLPFormat = (n) =>
@@ -1021,7 +1032,7 @@ router.get('/:id/export/pdf', async (req, res, next) => {
 
     // ── Encabezado ──────────────────────────────────────────────────────────
     doc.fontSize(16).font('Helvetica-Bold').text('CFL — Control de Fletes', 50, 50, { width: 290 });
-    doc.fontSize(13).font('Helvetica-Bold').text(`Factura ${factura.numero_factura}`, 340, 50, { width: 205, align: 'right' });
+    doc.fontSize(13).font('Helvetica-Bold').text(`Pre Factura ${factura.numero_factura}`, 340, 50, { width: 205, align: 'right' });
 
     const topInfoY = 80;
     doc.fontSize(9).font('Helvetica');

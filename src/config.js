@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const DEFAULT_DB_PORT = 1433;
-const DEFAULT_AUTHN_JWT_SECRET = "cfl-dev-secret";
+const MIN_JWT_SECRET_BYTES = 32;
 
 function parseEnvValue(raw) {
   const value = raw.trim();
@@ -66,10 +66,10 @@ const config = {
   app: {
     env: process.env.NODE_ENV || "development",
     port: toNumber(process.env.PORT, 4000),
-    corsOrigin: process.env.CORS_ORIGIN || "*",
+    corsOrigin: process.env.CORS_ORIGIN || false,
   },
   authn: {
-    jwtSecret: process.env.AUTHN_JWT_SECRET || DEFAULT_AUTHN_JWT_SECRET,
+    jwtSecret: requireJwtSecret(),
   },
   db: {
     host: process.env.DB_HOST,
@@ -92,14 +92,28 @@ const config = {
   },
 };
 
-if (
-  config.authn.jwtSecret === DEFAULT_AUTHN_JWT_SECRET &&
-  config.app.env === "production"
-) {
-  console.error(
-    "[SEGURIDAD] AUTHN_JWT_SECRET no esta configurado. Se esta usando el secreto de desarrollo en produccion. " +
-      "Configura la variable de entorno AUTHN_JWT_SECRET con un valor seguro."
-  );
+function requireJwtSecret() {
+  const secret = process.env.AUTHN_JWT_SECRET;
+
+  if (!secret) {
+    console.error(
+      "[SEGURIDAD FATAL] La variable de entorno AUTHN_JWT_SECRET no esta definida.\n" +
+        "Genera un secreto seguro con:\n" +
+        `  node -e "console.log(require('crypto').randomBytes(${MIN_JWT_SECRET_BYTES}).toString('hex'))"`
+    );
+    process.exit(1);
+  }
+
+  const entropyBytes = Buffer.byteLength(secret, "utf8");
+  if (entropyBytes < MIN_JWT_SECRET_BYTES) {
+    console.error(
+      `[SEGURIDAD FATAL] AUTHN_JWT_SECRET es demasiado corto (${entropyBytes} bytes). ` +
+        `Se requieren al menos ${MIN_JWT_SECRET_BYTES} bytes (${MIN_JWT_SECRET_BYTES * 2} caracteres hex).`
+    );
+    process.exit(1);
+  }
+
+  return secret;
 }
 
 module.exports = {

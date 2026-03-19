@@ -163,42 +163,15 @@ async function fetchAuthzContextByUsername(username) {
 }
 
 async function resolveAuthzContext(req) {
-  if (req.authnClaims) {
-    const byAuthnUser = await fetchAuthzContextByUserId(req.authnClaims.id_usuario);
-    if (byAuthnUser) return byAuthnUser;
-
-    const byAuthnRole = await fetchAuthzContextByRoleName(req.authnClaims.role);
-    if (byAuthnRole) return byAuthnRole;
+  if (!req.authnClaims) {
+    return null;
   }
 
-  const roleName = normalizeText(
-    req.header("x-cfl-role") || req.header("x-user-role") || req.query.role
-  );
-  const userId = normalizeText(
-    req.header("x-cfl-user-id") ||
-      req.header("x-user-id") ||
-      req.query.user_id
-  );
-  const username = normalizeText(
-    req.header("x-cfl-username") ||
-      req.header("x-username") ||
-      req.query.username
-  );
+  const byAuthnUser = await fetchAuthzContextByUserId(req.authnClaims.id_usuario);
+  if (byAuthnUser) return byAuthnUser;
 
-  if (userId) {
-    const byUserId = await fetchAuthzContextByUserId(userId);
-    if (byUserId) return byUserId;
-  }
-
-  if (username) {
-    const byUsername = await fetchAuthzContextByUsername(username);
-    if (byUsername) return byUsername;
-  }
-
-  if (roleName) {
-    const byRole = await fetchAuthzContextByRoleName(roleName);
-    if (byRole) return byRole;
-  }
+  const byAuthnRole = await fetchAuthzContextByRoleName(req.authnClaims.role);
+  if (byAuthnRole) return byAuthnRole;
 
   return null;
 }

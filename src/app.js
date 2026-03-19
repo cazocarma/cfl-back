@@ -1,4 +1,5 @@
 const express = require("express");
+const helmet = require("helmet");
 const cors = require("cors");
 const { config } = require("./config");
 const { getPool, getActiveDatabase } = require("./db");
@@ -11,17 +12,28 @@ const { operacionesRouter } = require("./routes/operaciones.routes");
 const { facturasRouter } = require("./routes/facturas.routes");
 const { requireJwtAuthn } = require("./middleware/authn.middleware");
 const { auditMiddleware } = require("./middleware/audit.middleware");
+const { writeLimiter, readLimiter } = require("./middleware/rate-limit.middleware");
 const { normalizeJsonTextPayload } = require("./text-normalizer");
 
 const app = express();
 
-app.use((_req, res, next) => {
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("X-XSS-Protection", "0");
-  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  next();
-});
+app.set("trust proxy", 1);
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc: ["'self'", "https://fonts.gstatic.com"],
+        imgSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  })
+);
 
 app.use(
   cors({
@@ -55,13 +67,12 @@ app.get("/health", async (_req, res) => {
       },
     });
   } catch (error) {
+    console.error("[health] Error de conexion a BD:", error.message);
     res.status(503).json({
       healthy: false,
       db: {
         connected: false,
-        database: getActiveDatabase(),
       },
-      error: error.message,
     });
   }
 });
@@ -78,6 +89,9 @@ app.use((req, res, next) => {
   return requireJwtAuthn(req, res, next);
 });
 
+app.use(writeLimiter);
+app.use(readLimiter);
+
 app.use(auditMiddleware);
 
 app.use("/api/dashboard", dashboardRouter);
@@ -89,16 +103,15 @@ app.use("/api/facturas", facturasRouter);
 app.use("/api/authn", authnRouter);
 
 app.use((error, _req, res, _next) => {
-  const message =
-    error && error.message ? error.message : "Error interno del servidor";
   const code =
     error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
   const dbErrorCode = error && error.number ? error.number : null;
 
+  console.error(`[error-handler] ${code}`, error.message || error);
+
   if (dbErrorCode === 2627 || dbErrorCode === 2601) {
     res.status(409).json({
       error: "Violacion de unicidad al guardar registro",
-      detail: message,
     });
     return;
   }
@@ -106,13 +119,12 @@ app.use((error, _req, res, _next) => {
   if (dbErrorCode === 547) {
     res.status(409).json({
       error: "No se puede eliminar o actualizar por integridad referencial",
-      detail: message,
     });
     return;
   }
 
   res.status(code).json({
-    error: message,
+    error: code >= 500 ? "Error interno del servidor" : error.message,
   });
 });
 

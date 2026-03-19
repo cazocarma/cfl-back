@@ -1,12 +1,14 @@
+const crypto = require("crypto");
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { getPool } = require("../db");
 const { config } = require("../config");
 const { resolveAuthzContext } = require("../authz");
-const {
-  authnLoginRateLimitMiddleware,
-} = require("../middleware/authn-login-rate-limit.middleware");
+const { revokeToken } = require("../token-blocklist");
+const { loginLimiter } = require("../middleware/rate-limit.middleware");
+const { validate } = require("../middleware/validate.middleware");
+const { loginBody } = require("../schemas/authn.schemas");
 
 const authnRouter = express.Router();
 
@@ -40,17 +42,11 @@ authnRouter.get("/context", async (req, res, next) => {
  */
 authnRouter.post(
   "/login",
-  authnLoginRateLimitMiddleware,
+  loginLimiter,
+  validate({ body: loginBody }),
   async (req, res, next) => {
     try {
-      const email = String(req.body?.email || "").trim();
-      const password = String(req.body?.password || "");
-
-      if (!email || !password) {
-        return res
-          .status(400)
-          .json({ error: "Email y contraseña son requeridos" });
-      }
+      const { email, password } = req.body;
 
       const pool = await getPool();
 
@@ -85,6 +81,7 @@ authnRouter.post(
       const primaryRole = roleResult.recordset[0]?.role_nombre || null;
 
       const authnClaims = {
+        jti: crypto.randomUUID(),
         id_usuario: Number(user.IdUsuario),
         username: user.Username,
         email: user.Email,
@@ -94,6 +91,7 @@ authnRouter.post(
       };
 
       const token = jwt.sign(authnClaims, config.authn.jwtSecret, {
+        algorithm: "HS256",
         expiresIn: "8h",
       });
 
@@ -121,6 +119,36 @@ authnRouter.post(
     }
   }
 );
+
+/**
+ * POST /api/authn/logout
+ * Revoca el token actual del usuario (requiere authn).
+ */
+authnRouter.post("/logout", async (req, res, next) => {
+  try {
+    const claims = req.authnClaims;
+    if (claims && claims.jti && claims.exp) {
+      await revokeToken(
+        claims.jti,
+        claims.id_usuario,
+        "logout",
+        new Date(claims.exp * 1000)
+      );
+    }
+
+    req.auditContext = {
+      userId: claims?.id_usuario,
+      action: "logout",
+      entity: "authn",
+      idEntidad: claims?.id_usuario,
+      summary: `Cierre de sesion para ${claims?.username}`,
+    };
+
+    return res.json({ message: "Sesion cerrada" });
+  } catch (error) {
+    next(error);
+  }
+});
 
 module.exports = {
   authnRouter,

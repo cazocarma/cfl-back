@@ -16,6 +16,8 @@ const {
   resolveFolioForLifecycle,
   resolveImputacionFlete,
 } = require("../helpers");
+const { validate } = require("../middleware/validate.middleware");
+const { fleteManualBody, fleteIdParam } = require("../schemas/fletes.schemas");
 
 const router = express.Router();
 
@@ -179,12 +181,8 @@ async function fetchDetalles(pool, idCabecera) {
   return result.recordset;
 }
 
-router.get("/:id_cabecera_flete", async (req, res, next) => {
-  const idCabecera = Number(req.params.id_cabecera_flete);
-  if (!Number.isInteger(idCabecera) || idCabecera <= 0) {
-    res.status(400).json({ error: "id_cabecera_flete invalido" });
-    return;
-  }
+router.get("/:id_cabecera_flete", validate({ params: fleteIdParam }), async (req, res, next) => {
+  const idCabecera = req.params.id_cabecera_flete;
 
   try {
     const pool = await getPool();
@@ -201,10 +199,10 @@ router.get("/:id_cabecera_flete", async (req, res, next) => {
   }
 });
 
-router.post("/manual", async (req, res, next) => {
-  const body = req.body || {};
-  const cabeceraIn = body.cabecera || {};
-  const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
+router.post("/manual", validate({ body: fleteManualBody }), async (req, res, next) => {
+  const body = req.body;
+  const cabeceraIn = body.cabecera;
+  const detallesIn = body.detalles;
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
@@ -430,16 +428,12 @@ router.post("/manual", async (req, res, next) => {
   }
 });
 
-router.put("/:id_cabecera_flete", async (req, res, next) => {
-  const idCabecera = Number(req.params.id_cabecera_flete);
-  if (!Number.isInteger(idCabecera) || idCabecera <= 0) {
-    res.status(400).json({ error: "id_cabecera_flete invalido" });
-    return;
-  }
+router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteManualBody }), async (req, res, next) => {
+  const idCabecera = req.params.id_cabecera_flete;
 
-  const body = req.body || {};
-  const cabeceraIn = body.cabecera || {};
-  const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
+  const body = req.body;
+  const cabeceraIn = body.cabecera;
+  const detallesIn = body.detalles;
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
