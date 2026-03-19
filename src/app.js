@@ -5,6 +5,7 @@ const { getPool, getActiveDatabase } = require("./db");
 const { dashboardRouter } = require("./routes/dashboard.routes");
 const { mantenedoresRouter } = require("./routes/mantenedores.routes");
 const { fletesRouter } = require("./routes/fletes.routes");
+const { fletesSapLoadsRouter } = require("./routes/fletes-sap-loads.routes");
 const { authnRouter } = require("./routes/authn.routes");
 const { operacionesRouter } = require("./routes/operaciones.routes");
 const { facturasRouter } = require("./routes/facturas.routes");
@@ -81,6 +82,7 @@ app.use(auditMiddleware);
 
 app.use("/api/dashboard", dashboardRouter);
 app.use("/api/mantenedores", mantenedoresRouter);
+app.use("/api/fletes/cargas-sap", fletesSapLoadsRouter);
 app.use("/api/fletes", fletesRouter);
 app.use("/api/operaciones", operacionesRouter);
 app.use("/api/facturas", facturasRouter);

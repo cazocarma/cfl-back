@@ -55,6 +55,11 @@ function toNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function trimTrailingSlash(value, fallback) {
+  const normalized = String(value || fallback || "").trim();
+  return normalized.replace(/\/+$/, "");
+}
+
 bootstrapEnv();
 
 const config = {
@@ -72,6 +77,18 @@ const config = {
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
+  },
+  sapAdapter: {
+    baseUrl: trimTrailingSlash(
+      process.env.SAP_ADAPTER_BASE_URL || process.env.SAP_ADAPTER_API_URL,
+      ""
+    ),
+    token: process.env.SAP_ADAPTER_API_TOKEN || process.env.SAP_ADAPTER_TOKEN || "",
+    defaultDestination: (process.env.SAP_ADAPTER_DEFAULT_DESTINATION || "PRD").trim().toUpperCase(),
+    requestTimeoutMs: toNumber(process.env.SAP_ADAPTER_REQUEST_TIMEOUT_MS, 125000),
+  },
+  cflSapLoad: {
+    maxDateRangeDays: toNumber(process.env.CFL_ETL_MAX_DATE_RANGE_DAYS, 30),
   },
 };
 

@@ -240,6 +240,8 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
     const baseQuery = buildMissingDeliveriesQuery(filters);
 
     const sqlQuery = `
+      SET NOCOUNT ON;
+
       SELECT
         SistemaFuente,
         SapNumeroEntrega,
@@ -425,6 +427,8 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         e.FechaUltimaVista,
         e.FechaActualizacion;
 
+      SET NOCOUNT OFF;
+
       SELECT total = COUNT_BIG(1)
       ${baseQuery};
 
@@ -472,8 +476,8 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
     `;
 
     const result = await request.query(sqlQuery);
-    const total = Number(result.recordsets[0][0].total);
-    const data = result.recordsets[1];
+    const total = Number(result.recordsets[0]?.[0]?.total ?? 0);
+    const data = result.recordsets[1] ?? [];
 
     res.json({
       data,
@@ -481,7 +485,7 @@ router.get("/fletes/no-ingresados", async (req, res, next) => {
         page,
         page_size: pageSize,
         total,
-        total_pages: Math.ceil(total / pageSize),
+        total_pages: Math.ceil(total / pageSize) || 0,
       },
     });
   } catch (error) {
