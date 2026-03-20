@@ -20,6 +20,7 @@ const fleteManualBody = z.object({
     fecha_salida: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Formato fecha: YYYY-MM-DD"),
     hora_salida: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, "Formato hora: HH:MM o HH:MM:SS"),
     monto_aplicado: z.coerce.number().min(0, "Monto no puede ser negativo").optional().nullable(),
+    monto_extra: z.coerce.number().min(0, "Monto extra no puede ser negativo").optional().nullable(),
     guia_remision: z.string().max(25).optional().nullable(),
     numero_entrega: z.string().max(20).optional().nullable(),
     id_detalle_viaje: z.coerce.number().int().positive().optional().nullable(),

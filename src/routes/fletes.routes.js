@@ -214,6 +214,8 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
+  const montoExtraRaw = cabeceraIn.monto_extra;
+  const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const guiaRemision = toNullableTrimmedString(cabeceraIn.guia_remision);
   const numeroEntrega = toNullableTrimmedString(cabeceraIn.numero_entrega);
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
@@ -298,6 +300,7 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraReq.input("horaSalida", sql.VarChar(8), horaSalida);
     insertCabeceraReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicado);
+    insertCabeceraReq.input("montoExtra", sql.Decimal(18, 2), montoExtra);
     insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
     insertCabeceraReq.input("idTarifa", sql.BigInt, idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
@@ -324,6 +327,7 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
         [FechaSalida],
         [HoraSalida],
         [MontoAplicado],
+        [MontoExtra],
         [IdMovil],
         [IdTarifa],
         [Observaciones],
@@ -352,6 +356,7 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
         @fechaSalida,
         CAST(@horaSalida AS TIME),
         @montoAplicado,
+        @montoExtra,
         @idMovil,
         @idTarifa,
         @observaciones,
@@ -445,6 +450,8 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
+  const montoExtraRaw = cabeceraIn.monto_extra;
+  const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const idDetalleViajeIn = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idProductorIn = parseOptionalBigInt(cabeceraIn.id_productor);
   const idFolioIn = parseOptionalBigInt(cabeceraIn.id_folio);
@@ -546,6 +553,7 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
       .input("fechaSalida", sql.Date, fechaSalida)
       .input("horaSalida", sql.VarChar(8), horaSalida)
       .input("montoAplicado", sql.Decimal(18, 2), montoAplicado)
+      .input("montoExtra", sql.Decimal(18, 2), montoExtra)
       .input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null)
       .input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null)
       .input("idDetalleViaje", sql.BigInt, idDetalleViaje)
@@ -568,6 +576,7 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
           FechaSalida = @fechaSalida,
           HoraSalida = CAST(@horaSalida AS TIME),
           MontoAplicado = @montoAplicado,
+          MontoExtra = @montoExtra,
           GuiaRemision = @guiaRemision,
           NumeroEntrega = @numeroEntrega,
           IdDetalleViaje = @idDetalleViaje,

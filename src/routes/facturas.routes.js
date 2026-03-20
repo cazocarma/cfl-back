@@ -107,13 +107,22 @@ async function computePreview(pool, idEmpresa, idsFolio, criterio) {
           THEN CONCAT(COALESCE(no.nombre,'Origen'), ' -> ', COALESCE(nd.nombre,'Destino'))
           ELSE NULL END
       ),
-      empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL)
+      empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL),
+      empresa_rut    = emp.Rut,
+      chofer_nombre  = ch.SapNombre,
+      chofer_rut     = ch.SapIdFiscal,
+      camion_patente = cam.SapPatente,
+      camion_carro   = cam.SapCarro,
+      tipo_camion    = tc.Nombre
     FROM [cfl].[CabeceraFlete] cf
     LEFT JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
     LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
     LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
     LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
     LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
+    LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
+    LEFT JOIN [cfl].[Camion] cam ON cam.IdCamion = mv.IdCamion
+    LEFT JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = cam.IdTipoCamion
     LEFT JOIN [cfl].[Tarifa] tar ON tar.IdTarifa = cf.IdTarifa
     LEFT JOIN [cfl].[Ruta] r ON r.IdRuta = tar.IdRuta
     LEFT JOIN [cfl].[NodoLogistico] no ON no.IdNodo = r.IdOrigenNodo
@@ -260,7 +269,16 @@ async function fetchFactura(pool, idFactura) {
             THEN CONCAT(COALESCE(no.nombre,'Origen'), ' -> ', COALESCE(nd.nombre,'Destino'))
             ELSE NULL END
         ),
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL)
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL),
+        empresa_rut    = emp.Rut,
+        chofer_nombre  = ch.SapNombre,
+        chofer_rut     = ch.SapIdFiscal,
+        camion_patente = cam.SapPatente,
+        camion_carro   = cam.SapCarro,
+        tipo_camion    = tc.Nombre,
+        detalle_viaje  = dv.Descripcion,
+        productor_nombre = prod.Nombre,
+        productor_codigo = prod.CodigoProveedor
       FROM [cfl].[FacturaFolio] ff
       INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = ff.IdFolio
       INNER JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
@@ -268,15 +286,52 @@ async function fetchFactura(pool, idFactura) {
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
       LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
+      LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
+      LEFT JOIN [cfl].[Camion] cam ON cam.IdCamion = mv.IdCamion
+      LEFT JOIN [cfl].[TipoCamion] tc ON tc.IdTipoCamion = cam.IdTipoCamion
       LEFT JOIN [cfl].[Tarifa] tar ON tar.IdTarifa = cf.IdTarifa
       LEFT JOIN [cfl].[Ruta] r ON r.IdRuta = tar.IdRuta
       LEFT JOIN [cfl].[NodoLogistico] no ON no.IdNodo = r.IdOrigenNodo
       LEFT JOIN [cfl].[NodoLogistico] nd ON nd.IdNodo = r.IdDestinoNodo
+      LEFT JOIN [cfl].[DetalleViaje] dv ON dv.IdDetalleViaje = cf.IdDetalleViaje
+      LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
       WHERE ff.IdFactura = @idFactura
       ORDER BY cf.FechaSalida, cf.IdCabeceraFlete;
     `);
 
-  return { ...factura, folios: foliosResult.recordset, movimientos: movResult.recordset };
+  // Detalles de materiales/especies por cada movimiento
+  const detResult = await pool.request()
+    .input('idFactura', sql.BigInt, idFactura)
+    .query(`
+      SELECT
+        df.IdCabeceraFlete,
+        df.Material,
+        df.Descripcion,
+        df.Cantidad,
+        df.Unidad,
+        especie_glosa = esp.Glosa
+      FROM [cfl].[DetalleFlete] df
+      INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdCabeceraFlete = df.IdCabeceraFlete
+      INNER JOIN [cfl].[FacturaFolio] ff ON ff.IdFolio = cf.IdFolio
+      LEFT JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
+      WHERE ff.IdFactura = @idFactura
+      ORDER BY df.IdCabeceraFlete, df.IdDetalleFlete;
+    `);
+
+  // Agrupar detalles por IdCabeceraFlete
+  const detallesPorFlete = {};
+  for (const d of detResult.recordset) {
+    if (!detallesPorFlete[d.IdCabeceraFlete]) detallesPorFlete[d.IdCabeceraFlete] = [];
+    detallesPorFlete[d.IdCabeceraFlete].push(d);
+  }
+
+  // Adjuntar detalles a cada movimiento
+  const movimientos = movResult.recordset.map(m => ({
+    ...m,
+    detalles: detallesPorFlete[m.IdCabeceraFlete] || [],
+  }));
+
+  return { ...factura, folios: foliosResult.recordset, movimientos };
 }
 
 // ===========================================================================
@@ -326,6 +381,49 @@ router.get('/empresas-elegibles', async (req, res, next) => {
         )
       ORDER BY empresa_nombre;
     `);
+
+    res.json({ data: result.recordset });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /facturas/periodos-con-movimientos?id_empresa=X
+// Meses con movimientos elegibles para una empresa transportista
+// ---------------------------------------------------------------------------
+router.get('/periodos-con-movimientos', async (req, res, next) => {
+  const idEmpresa = parsePositiveInt(req.query.id_empresa, 0);
+  if (!idEmpresa) {
+    res.status(400).json({ error: 'id_empresa requerido' });
+    return;
+  }
+
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('idEmpresa', sql.BigInt, idEmpresa)
+      .query(`
+        SELECT
+          YEAR(cf.FechaSalida)  AS anio,
+          MONTH(cf.FechaSalida) AS mes,
+          COUNT_BIG(cf.IdCabeceraFlete) AS total_movimientos,
+          COALESCE(SUM(cf.MontoAplicado), 0) AS monto_neto
+        FROM [cfl].[CabeceraFlete] cf
+        INNER JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+        INNER JOIN [cfl].[Folio] f ON f.IdFolio = cf.IdFolio
+        WHERE mv.IdEmpresaTransporte = @idEmpresa
+          AND UPPER(cf.estado) = 'ASIGNADO_FOLIO'
+          AND f.IdFolio NOT IN (
+            SELECT ff.IdFolio
+            FROM [cfl].[FacturaFolio] ff
+            INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = ff.IdFactura
+            WHERE LOWER(fac.estado) != 'anulada'
+          )
+          AND cf.FechaSalida IS NOT NULL
+        GROUP BY YEAR(cf.FechaSalida), MONTH(cf.FechaSalida)
+        ORDER BY anio DESC, mes DESC;
+      `);
 
     res.json({ data: result.recordset });
   } catch (err) {
@@ -484,6 +582,15 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
     transaction = new sql.Transaction(pool);
     await transaction.begin();
 
+    // Obtener código de temporada activa para el sufijo del número de pre factura
+    const tempResult = await new sql.Request(transaction).query(`
+      SELECT TOP 1 Codigo
+      FROM [cfl].[Temporada]
+      WHERE Activa = 1
+      ORDER BY FechaInicio DESC, IdTemporada DESC;
+    `);
+    const temporadaCodigo = tempResult.recordset[0]?.codigo || '';
+
     const now = new Date();
     const createdIds = [];
 
@@ -515,8 +622,9 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
 
       const idFactura = Number(insertFac.recordset[0].id_factura);
 
-      // 2. Actualizar número definitivo: INT-XXXXXX
-      const numeroFactura = `INT-${String(idFactura).padStart(6, '0')}`;
+      // 2. Actualizar número definitivo: INT-XXXXXX-TTTT
+      const sufijoTemp = temporadaCodigo ? `-${temporadaCodigo}` : '';
+      const numeroFactura = `INT-${String(idFactura).padStart(6, '0')}${sufijoTemp}`;
       await new sql.Request(transaction)
         .input('idFactura',      sql.BigInt,    idFactura)
         .input('numeroFactura',  sql.VarChar(40), numeroFactura)
@@ -832,8 +940,71 @@ router.put('/:id', validate({ params: idParam, body: actualizarFacturaBody }), a
 });
 
 // ---------------------------------------------------------------------------
+// DELETE /facturas/:id — eliminar factura en Borrador definitivamente
+// Devuelve todos los fletes a ASIGNADO_FOLIO
+// ---------------------------------------------------------------------------
+router.delete('/:id', async (req, res, next) => {
+  const idFactura = parsePositiveInt(req.params.id, 0);
+  if (!idFactura) { res.status(400).json({ error: 'id_factura inválido' }); return; }
+
+  const { allowed } = await checkFacturacionPerm(req);
+  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
+
+  let transaction;
+  try {
+    const pool = await getPool();
+    const factura = await fetchFactura(pool, idFactura);
+    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
+    if (factura.estado !== 'borrador') {
+      res.status(409).json({ error: 'Solo se pueden eliminar pre facturas en estado Borrador' });
+      return;
+    }
+
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+    const now = new Date();
+
+    // Devolver fletes a ASIGNADO_FOLIO
+    const folioIds = factura.folios.map(f => f.id_folio);
+    if (folioIds.length) {
+      const inParts = folioIds.map((_, i) => `@df${i}`).join(',');
+      const updReq = new sql.Request(transaction);
+      updReq.input('updatedAt', sql.DateTime2(0), now);
+      folioIds.forEach((fId, i) => updReq.input(`df${i}`, sql.BigInt, fId));
+      await updReq.query(`
+        UPDATE [cfl].[CabeceraFlete]
+        SET estado = 'ASIGNADO_FOLIO', FechaActualizacion = @updatedAt
+        WHERE IdFolio IN (${inParts})
+          AND UPPER(estado) = 'FACTURADO';
+      `);
+    }
+
+    // Eliminar registros bridge
+    await new sql.Request(transaction)
+      .input('idFactura', sql.BigInt, idFactura)
+      .query(`DELETE FROM [cfl].[FacturaFolio] WHERE IdFactura = @idFactura;`);
+
+    // Eliminar detalles
+    await new sql.Request(transaction)
+      .input('idFactura', sql.BigInt, idFactura)
+      .query(`DELETE FROM [cfl].[DetalleFactura] WHERE IdFactura = @idFactura;`);
+
+    // Eliminar cabecera
+    await new sql.Request(transaction)
+      .input('idFactura', sql.BigInt, idFactura)
+      .query(`DELETE FROM [cfl].[CabeceraFactura] WHERE IdFactura = @idFactura;`);
+
+    await transaction.commit();
+    res.json({ message: 'Pre factura eliminada exitosamente' });
+  } catch (err) {
+    if (transaction) { try { await transaction.rollback(); } catch (_) {} }
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // PATCH /facturas/:id/estado — transición de estado
-// Body: { estado: 'emitida' | 'anulada' }
+// Body: { estado: 'anulada' | 'recibida' }
 // ---------------------------------------------------------------------------
 router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody }), async (req, res, next) => {
   const idFactura = req.params.id;
@@ -843,8 +1014,8 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
   }
 
   const nuevoEstado = String(req.body?.estado || '').toLowerCase();
-  if (nuevoEstado !== 'emitida' && nuevoEstado !== 'anulada') {
-    res.status(400).json({ error: 'estado debe ser "emitida" o "anulada"' });
+  if (!['anulada', 'recibida'].includes(nuevoEstado)) {
+    res.status(400).json({ error: 'estado debe ser "anulada" o "recibida"' });
     return;
   }
 
@@ -858,12 +1029,12 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
     if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
 
     // Validar transición de estado
-    if (nuevoEstado === 'emitida' && factura.estado !== 'borrador') {
-      res.status(409).json({ error: 'Solo se puede emitir una pre factura en estado Borrador' });
+    if (nuevoEstado === 'recibida' && factura.estado !== 'borrador') {
+      res.status(409).json({ error: 'Solo se puede marcar como recibida una pre factura en estado Borrador' });
       return;
     }
-    if (nuevoEstado === 'anulada' && factura.estado === 'anulada') {
-      res.status(409).json({ error: 'La pre factura ya está anulada' });
+    if (nuevoEstado === 'anulada' && (factura.estado === 'anulada' || factura.estado === 'recibida')) {
+      res.status(409).json({ error: 'La pre factura no se puede anular desde su estado actual' });
       return;
     }
 
@@ -973,6 +1144,11 @@ router.get('/:id/export/excel', async (req, res, next) => {
       { header: 'Centro de Costo',  key: 'centro_costo',         width: 22 },
       { header: 'Ruta',             key: 'ruta',                 width: 30 },
       { header: 'Empresa Transp.',  key: 'empresa_nombre',       width: 25 },
+      { header: 'RUT Empresa',      key: 'empresa_rut',          width: 14 },
+      { header: 'Chofer',           key: 'chofer_nombre',        width: 25 },
+      { header: 'RUT Chofer',       key: 'chofer_rut',           width: 14 },
+      { header: 'Patente',          key: 'camion_patente',       width: 12 },
+      { header: 'Tipo Camión',      key: 'tipo_camion',          width: 18 },
       { header: 'Fecha Salida',     key: 'fecha_salida',         width: 14 },
       { header: 'Monto',            key: 'monto_aplicado',       width: 15 },
     ];
@@ -988,6 +1164,11 @@ router.get('/:id/export/excel', async (req, res, next) => {
         centro_costo:       m.centro_costo || '-',
         ruta:               m.ruta || '-',
         empresa_nombre:     m.empresa_nombre || '-',
+        empresa_rut:        m.empresa_rut || '-',
+        chofer_nombre:      m.chofer_nombre || '-',
+        chofer_rut:         m.chofer_rut || '-',
+        camion_patente:     m.camion_patente || '-',
+        tipo_camion:        m.tipo_camion || '-',
         fecha_salida:       m.fecha_salida,
         monto_aplicado:     Number(m.monto_aplicado) || 0,
       });
@@ -1020,7 +1201,8 @@ router.get('/:id/export/pdf', async (req, res, next) => {
     const factura = await fetchFactura(pool, idFactura);
     if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
 
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+    // Letter landscape
+    const doc = new PDFDocument({ size: 'LETTER', layout: 'landscape', margin: 36 });
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="pre-factura-${factura.numero_factura}.pdf"`);
     doc.pipe(res);
@@ -1029,89 +1211,270 @@ router.get('/:id/export/pdf', async (req, res, next) => {
       `$${Number(n || 0).toLocaleString('es-CL', { maximumFractionDigits: 0 })}`;
     const dateFormat = (d) =>
       d ? new Date(d).toLocaleDateString('es-CL') : '-';
+    // Translate push/pull to Despacho/Retorno
+    const tipoMovLabel = (tm) => {
+      const v = String(tm || '').trim().toLowerCase();
+      if (v === 'push') return 'Despacho';
+      if (v === 'pull') return 'Retorno';
+      return tm || '-';
+    };
+
+    const pageW = 792;  // Letter landscape width
+    const pageH = 612;  // Letter landscape height
+    const marginL = 36;
+    const marginR = 36;
+    const contentW = pageW - marginL - marginR;
+    const footerY = pageH - 30;
+    const tableBottomLimit = footerY - 10;
 
     // ── Encabezado ──────────────────────────────────────────────────────────
-    doc.fontSize(16).font('Helvetica-Bold').text('CFL — Control de Fletes', 50, 50, { width: 290 });
-    doc.fontSize(13).font('Helvetica-Bold').text(`Pre Factura ${factura.numero_factura}`, 340, 50, { width: 205, align: 'right' });
+    doc.rect(0, 0, pageW, 50).fill('#1e4424');
+    doc.fontSize(13).font('Helvetica-Bold').fillColor('#ffffff')
+      .text('Greenvic SPA', marginL + 8, 6, { width: 300 });
+    doc.fontSize(8).font('Helvetica').fillColor('#d1fae5')
+      .text('CFL — Control de Fletes', marginL + 8, 22, { width: 300 });
+    doc.fontSize(6.5).fillColor('#a7f3d0')
+      .text('RUT: 78.335.990-1', marginL + 8, 34, { width: 300 });
 
-    const topInfoY = 80;
-    doc.fontSize(9).font('Helvetica');
-    doc.text(`Empresa: ${factura.empresa_nombre}`, 50, topInfoY, { width: 495 });
-    doc.text(`RUT: ${factura.empresa_rut || '-'}`);
-    doc.text(`Fecha emisión: ${dateFormat(factura.fecha_emision)}   |   Estado: ${factura.estado}   |   Moneda: ${factura.moneda}`);
-    if (factura.criterio_agrupacion) {
-      doc.text(`Criterio agrupación: ${factura.criterio_agrupacion}`);
-    }
-    if (factura.observaciones) {
-      doc.text(`Observaciones: ${factura.observaciones}`);
-    }
+    // Lado derecho: PRE FACTURA grande
+    doc.fontSize(20).font('Helvetica-Bold').fillColor('#ffffff')
+      .text('PRE FACTURA', pageW - marginR - 240, 6, { width: 232, align: 'right' });
+    doc.fontSize(10).font('Helvetica').fillColor('#a7f3d0')
+      .text(factura.numero_factura, pageW - marginR - 240, 30, { width: 232, align: 'right' });
 
-    doc.moveDown(0.8);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-    doc.moveDown(0.6);
-
-    // ── Encabezado de tabla ─────────────────────────────────────────────────
-    const colX = [50, 125, 200, 278, 356, 430];
-    const colW = [70, 70,  73,  73,  69,  110];
-
+    // Metadata debajo de la barra
+    doc.fillColor('#000000');
+    let infoY = 58;
     doc.font('Helvetica-Bold').fontSize(8);
-    const hdrY = doc.y;
-    doc.text('N° Guía / Entrega', colX[0], hdrY, { width: colW[0], lineBreak: false });
-    doc.text('Folio',             colX[1], hdrY, { width: colW[1], lineBreak: false });
-    doc.text('Tipo Flete',        colX[2], hdrY, { width: colW[2], lineBreak: false });
-    doc.text('Centro Costo',      colX[3], hdrY, { width: colW[3], lineBreak: false });
-    doc.text('Fecha',             colX[4], hdrY, { width: colW[4], lineBreak: false });
-    doc.text('Monto',             colX[5], hdrY, { width: colW[5], align: 'right' });
+    doc.text(factura.empresa_nombre, marginL, infoY);
+    doc.font('Helvetica').fontSize(7);
+    doc.text(`RUT: ${factura.empresa_rut || '-'}`, marginL + 200, infoY);
+    doc.text(`Fecha emisión: ${dateFormat(factura.fecha_emision)}`, marginL, infoY + 11);
+    doc.text(`Moneda: ${factura.moneda}`, marginL + 200, infoY + 11);
 
-    doc.moveDown(0.3);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-    doc.moveDown(0.4);
+    if (factura.observaciones) {
+      doc.text(`Obs: ${factura.observaciones}`, marginL, infoY + 22, { width: contentW });
+      infoY += 12;
+    }
 
-    // ── Filas de movimientos ────────────────────────────────────────────────
-    doc.font('Helvetica').fontSize(8);
+    infoY += 28;
+    doc.moveTo(marginL, infoY).lineTo(pageW - marginR, infoY).lineWidth(0.5).strokeColor('#c4c4c4').stroke();
+    infoY += 5;
+
+    // ── Columnas de la tabla ────────────────────────────────────────────────
+    // Columnas: Fecha, Tipo Mov, N° Guía, Tipo Camión, Patente, Chofer, Ruta,
+    //           Det. Viaje, Productor, C. Costo, Tipo Flete, Valor
+    const cols = [
+      { label: 'Fecha',       w: 46, align: 'left'  },
+      { label: 'Tipo Mov.',   w: 46, align: 'left'  },
+      { label: 'N° Guía',     w: 52, align: 'left'  },
+      { label: 'Tipo Cam.',   w: 50, align: 'left'  },
+      { label: 'Patente',     w: 46, align: 'left'  },
+      { label: 'Chofer',      w: 72, align: 'left'  },
+      { label: 'Ruta',        w: 100, align: 'left'  },
+      { label: 'Det. Viaje',  w: 62, align: 'left'  },
+      { label: 'Productor',   w: 72, align: 'left'  },
+      { label: 'C. Costo',    w: 46, align: 'left'  },
+      { label: 'Tipo Flete',  w: 58, align: 'left'  },
+      { label: 'Valor',       w: 58, align: 'right' },
+    ];
+    // Scale to fit contentW
+    const totalColW = cols.reduce((s, c) => s + c.w, 0);
+    const sf = contentW / totalColW;
+    for (const c of cols) { c.w = Math.round(c.w * sf); }
+    const rndDiff = contentW - cols.reduce((s, c) => s + c.w, 0);
+    if (rndDiff !== 0) cols[6].w += rndDiff; // absorb in Ruta
+
+    let cx = marginL;
+    for (const c of cols) { c.x = cx; cx += c.w; }
+
+    const headerH = 15;
+    const fs = 6.2;
+    const pad = 2; // cell padding
+
+    // ── Helpers de dibujo ───────────────────────────────────────────────────
+    function drawTableHeader(y) {
+      doc.rect(marginL, y, contentW, headerH).fill('#f0fdf4');
+      doc.font('Helvetica-Bold').fontSize(fs).fillColor('#1e4424');
+      for (const c of cols) {
+        doc.text(c.label, c.x + pad, y + 4, { width: c.w - pad * 2, lineBreak: false, align: c.align });
+      }
+      doc.fillColor('#000000');
+      return y + headerH;
+    }
+
+    function drawPageFooter() {
+      doc.fontSize(6).font('Helvetica').fillColor('#999999').text(
+        `Pre Factura ${factura.numero_factura} — pág. ${doc.bufferedPageRange().count}`,
+        marginL, footerY, { width: contentW, align: 'center' }
+      );
+    }
+
+    function newPage() {
+      drawPageFooter();
+      doc.addPage();
+      return drawTableHeader(30);
+    }
+
+    // Measure text height allowing wrapping inside a column width
+    function textH(text, colW, size) {
+      return doc.font('Helvetica').fontSize(size).heightOfString(String(text || ''), { width: colW - pad * 2 });
+    }
+
+    let tableY = drawTableHeader(infoY);
+
+    // ── Filas ───────────────────────────────────────────────────────────────
+    let rowIdx = 0;
+    const detailIndent = Math.round(contentW * 0.25); // 1/4 page tab
+    const detailFontSize = 5.5;
+    const subRowH = 7;
+
     for (const m of factura.movimientos) {
-      if (doc.y > 700) {
-        doc.addPage();
-        doc.moveTo(50, 50).lineTo(545, 50).stroke();
-        doc.text('(continuación)', 50, 55, { width: 495, align: 'center' });
-        doc.moveDown(0.5);
+      const detalles = m.detalles || [];
+
+      // Compute dynamic row height based on wrapping content
+      const choferRut = m.chofer_rut || '';
+      const choferNombre = m.chofer_nombre || '-';
+      const prodCodigo = m.productor_codigo || '';
+      const prodNombre = m.productor_nombre || '-';
+      const rutaText = m.ruta || '-';
+
+      // Measure tallest cell (allow line breaks)
+      const ccText = `${m.centro_costo_codigo || '-'}\n${m.centro_costo || ''}`.trim();
+      const cellTexts = [
+        { text: rutaText, w: cols[6].w },
+        { text: `${choferRut}\n${choferNombre}`, w: cols[5].w },
+        { text: `${prodCodigo}\n${prodNombre}`, w: cols[8].w },
+        { text: m.detalle_viaje || '-', w: cols[7].w },
+        { text: ccText, w: cols[9].w },
+      ];
+      let maxCellH = 12; // minimum
+      for (const ct of cellTexts) {
+        const h = textH(ct.text, ct.w, fs);
+        if (h > maxCellH) maxCellH = h;
+      }
+      const mainRowH = maxCellH + 6; // padding top+bottom
+
+      // Detail rows go below the main row
+      const detailBlockH = detalles.length > 0 ? (detalles.length * subRowH + 14) : 0;
+      const rowH = mainRowH + detailBlockH;
+
+      // Page break
+      if (tableY + rowH > tableBottomLimit) {
+        tableY = newPage();
+        rowIdx = 0;
       }
 
-      const rowY = doc.y;
-      const ref = m.guia_remision || m.numero_entrega || m.sap_numero_entrega || '-';
+      // Alternate background
+      if (rowIdx % 2 === 0) {
+        doc.rect(marginL, tableY, contentW, rowH).fill('#fafafa');
+      }
+      // Row separator
+      doc.moveTo(marginL, tableY).lineTo(pageW - marginR, tableY)
+        .lineWidth(0.3).strokeColor('#e0e0e0').stroke();
 
-      doc.text(ref,                          colX[0], rowY, { width: colW[0], lineBreak: false });
-      doc.text(m.folio_numero || '-',        colX[1], rowY, { width: colW[1], lineBreak: false });
-      doc.text(m.tipo_flete_nombre || '-',   colX[2], rowY, { width: colW[2], lineBreak: false });
-      doc.text(m.centro_costo || '-',        colX[3], rowY, { width: colW[3], lineBreak: false });
-      doc.text(dateFormat(m.fecha_salida),   colX[4], rowY, { width: colW[4], lineBreak: false });
-      doc.text(CLPFormat(m.monto_aplicado),  colX[5], rowY, { width: colW[5], align: 'right' });
+      const guia = m.GuiaRemision || m.NumeroEntrega || m.SapNumeroEntrega || '-';
+      const ly = tableY + 3;
 
-      // Avanzar manualmente al siguiente renglón
-      doc.text('', 50, rowY + 14);
+      // ─ Render cells (allow lineBreak: true for wrapping) ─
+      doc.font('Helvetica').fontSize(fs).fillColor('#1a1a1a');
+      doc.text(dateFormat(m.FechaSalida),    cols[0].x + pad, ly, { width: cols[0].w - pad * 2 });
+      doc.text(tipoMovLabel(m.TipoMovimiento), cols[1].x + pad, ly, { width: cols[1].w - pad * 2 });
+      doc.text(String(guia),                 cols[2].x + pad, ly, { width: cols[2].w - pad * 2 });
+      doc.text(String(m.tipo_camion || '-'), cols[3].x + pad, ly, { width: cols[3].w - pad * 2 });
+      doc.text(String(m.camion_patente || '-'), cols[4].x + pad, ly, { width: cols[4].w - pad * 2 });
+
+      // Chofer: RUT arriba, nombre abajo
+      doc.font('Helvetica-Bold').fontSize(fs).fillColor('#1a1a1a');
+      doc.text(choferRut || '-', cols[5].x + pad, ly, { width: cols[5].w - pad * 2, lineBreak: false });
+      doc.font('Helvetica').fontSize(fs);
+      doc.text(choferNombre, cols[5].x + pad, ly + 8, { width: cols[5].w - pad * 2 });
+
+      // Ruta (wider column, allow wrap)
+      doc.text(rutaText, cols[6].x + pad, ly, { width: cols[6].w - pad * 2 });
+
+      // Detalle viaje
+      doc.text(String(m.detalle_viaje || '-'), cols[7].x + pad, ly, { width: cols[7].w - pad * 2 });
+
+      // Productor: código arriba, nombre abajo
+      doc.font('Helvetica-Bold').fontSize(fs).fillColor('#1a1a1a');
+      doc.text(prodCodigo || '-', cols[8].x + pad, ly, { width: cols[8].w - pad * 2, lineBreak: false });
+      doc.font('Helvetica').fontSize(fs);
+      doc.text(prodNombre, cols[8].x + pad, ly + 8, { width: cols[8].w - pad * 2 });
+
+      doc.text(`${m.centro_costo_codigo || '-'}\n${m.centro_costo || ''}`.trim(), cols[9].x + pad, ly, { width: cols[9].w - pad * 2 });
+      doc.text(String(m.tipo_flete_nombre || '-'), cols[10].x + pad, ly, { width: cols[10].w - pad * 2 });
+
+      // Valor (bold)
+      doc.font('Helvetica-Bold').fontSize(fs).fillColor('#1a1a1a');
+      doc.text(CLPFormat(m.MontoAplicado), cols[11].x + pad, ly, { width: cols[11].w - pad * 2, align: 'right' });
+
+      // ─ Detail sub-rows: material, especie, cantidad ─
+      if (detalles.length > 0) {
+        const detStartY = tableY + mainRowH;
+        const detailX = marginL + detailIndent;
+        const detailW = contentW - detailIndent - 10;
+
+        // Detail header
+        doc.font('Helvetica-Bold').fontSize(detailFontSize).fillColor('#1e4424');
+        doc.text('Material', detailX, detStartY, { width: detailW * 0.45, lineBreak: false });
+        doc.text('Especie', detailX + detailW * 0.45, detStartY, { width: detailW * 0.35, lineBreak: false });
+        doc.text('Cantidad', detailX + detailW * 0.80, detStartY, { width: detailW * 0.20, align: 'right', lineBreak: false });
+
+        doc.font('Helvetica').fontSize(detailFontSize).fillColor('#444444');
+        let subY = detStartY + subRowH;
+        for (const det of detalles) {
+          const matLabel = det.Material || det.Descripcion || '-';
+          const espLabel = det.especie_glosa || '-';
+          const cantLabel = det.Cantidad != null ? String(det.Cantidad) : '-';
+
+          doc.text(matLabel, detailX, subY, { width: detailW * 0.45, lineBreak: false });
+          doc.text(espLabel, detailX + detailW * 0.45, subY, { width: detailW * 0.35, lineBreak: false });
+          doc.text(cantLabel, detailX + detailW * 0.80, subY, { width: detailW * 0.20, align: 'right', lineBreak: false });
+          subY += subRowH;
+        }
+      }
+
+      doc.fillColor('#000000');
+      tableY += rowH;
+      rowIdx++;
     }
 
+    // ── Línea final de tabla ────────────────────────────────────────────────
+    doc.moveTo(marginL, tableY).lineTo(pageW - marginR, tableY).lineWidth(0.5).strokeColor('#c4c4c4').stroke();
+    tableY += 14;
+
     // ── Totales ─────────────────────────────────────────────────────────────
-    doc.moveDown(0.5);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke();
-    doc.moveDown(0.5);
+    const totalsBlockH = 70;
+    if (tableY + totalsBlockH > tableBottomLimit) {
+      tableY = newPage();
+    }
 
-    doc.font('Helvetica').fontSize(9);
-    doc.text(`Neto:`,         50,  doc.y, { width: 400, continued: true });
-    doc.text(CLPFormat(factura.monto_neto), { width: 95, align: 'right' });
+    const totalsX = pageW - marginR - 220;
+    const totalsW = 220;
+    const labelW = 130;
+    const valueW = 80;
 
-    doc.text(`IVA (19%):`,    50,  doc.y, { width: 400, continued: true });
-    doc.text(CLPFormat(factura.monto_iva),  { width: 95, align: 'right' });
+    doc.rect(totalsX - 6, tableY - 4, totalsW + 12, totalsBlockH).fill('#f9fafb');
 
-    doc.font('Helvetica-Bold').fontSize(10);
-    doc.text(`Total:`,        50,  doc.y, { width: 400, continued: true });
-    doc.text(CLPFormat(factura.monto_total), { width: 95, align: 'right' });
+    doc.font('Helvetica').fontSize(10).fillColor('#333333');
+    doc.text('Neto:', totalsX, tableY, { width: labelW });
+    doc.text(CLPFormat(factura.monto_neto), totalsX + labelW, tableY, { width: valueW, align: 'right' });
+    tableY += 16;
+
+    doc.text('IVA (19%):', totalsX, tableY, { width: labelW });
+    doc.text(CLPFormat(factura.monto_iva), totalsX + labelW, tableY, { width: valueW, align: 'right' });
+    tableY += 14;
+
+    doc.moveTo(totalsX, tableY).lineTo(totalsX + totalsW, tableY).lineWidth(0.5).strokeColor('#1e4424').stroke();
+    tableY += 6;
+
+    doc.font('Helvetica-Bold').fontSize(13).fillColor('#1e4424');
+    doc.text('Total:', totalsX, tableY, { width: labelW });
+    doc.text(CLPFormat(factura.monto_total), totalsX + labelW, tableY, { width: valueW, align: 'right' });
 
     // ── Pie de página ───────────────────────────────────────────────────────
-    doc.fontSize(7).font('Helvetica').text(
-      `Generado el ${new Date().toLocaleDateString('es-CL')} · Documento informativo, no oficial`,
-      50, 790, { align: 'center', width: 495 }
-    );
+    drawPageFooter();
 
     doc.end();
   } catch (err) {

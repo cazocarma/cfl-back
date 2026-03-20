@@ -1589,6 +1589,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
   const montoAplicadoRaw = cabeceraIn.monto_aplicado;
   const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
+  const montoExtraRaw = cabeceraIn.monto_extra;
+  const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
@@ -1778,6 +1780,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
     insertCabeceraReq.input("horaSalida", sql.VarChar(8), horaSalida);
     insertCabeceraReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicado);
+    insertCabeceraReq.input("montoExtra", sql.Decimal(18, 2), montoExtra);
     insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
     insertCabeceraReq.input("idTarifa", sql.BigInt, idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
@@ -1805,6 +1808,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         [FechaSalida],
         [HoraSalida],
         [MontoAplicado],
+        [MontoExtra],
         [IdMovil],
         [IdTarifa],
         [Observaciones],
@@ -1834,6 +1838,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
         @fechaSalida,
         CAST(@horaSalida AS TIME),
         @montoAplicado,
+        @montoExtra,
         @idMovil,
         @idTarifa,
         @observaciones,
