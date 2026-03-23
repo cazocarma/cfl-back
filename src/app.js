@@ -10,6 +10,7 @@ const { fletesSapLoadsRouter } = require("./routes/fletes-sap-loads.routes");
 const { authnRouter } = require("./routes/authn.routes");
 const { operacionesRouter } = require("./routes/operaciones.routes");
 const { facturasRouter } = require("./routes/facturas.routes");
+const { planillasSapRouter } = require("./routes/planillas-sap.routes");
 const { requireJwtAuthn } = require("./middleware/authn.middleware");
 const { auditMiddleware } = require("./middleware/audit.middleware");
 const { writeLimiter, readLimiter } = require("./middleware/rate-limit.middleware");
@@ -100,6 +101,7 @@ app.use("/api/fletes/cargas-sap", fletesSapLoadsRouter);
 app.use("/api/fletes", fletesRouter);
 app.use("/api/operaciones", operacionesRouter);
 app.use("/api/facturas", facturasRouter);
+app.use("/api/planillas-sap", planillasSapRouter);
 app.use("/api/authn", authnRouter);
 
 app.use((error, _req, res, _next) => {

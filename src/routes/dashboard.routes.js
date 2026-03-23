@@ -886,7 +886,9 @@ router.post("/folios/asignar", async (req, res, next) => {
     const targetFolioNumero = String(folio.FolioNumero || "").trim();
     const targetFolioIsDefault = targetFolioNumero === "0";
 
+    // Validar fletes: deben existir, estar COMPLETADO y ser del mismo transportista
     const invalid = [];
+    const transportistaSet = new Set();
 
     for (const idCabecera of cabeceraIds) {
       const rowResult = await new sql.Request(transaction)
@@ -896,9 +898,9 @@ router.post("/folios/asignar", async (req, res, next) => {
             cf.IdCabeceraFlete,
             cf.Estado,
             cf.IdFolio,
-            FolioNumero = f.FolioNumero
+            mv.IdEmpresaTransporte
           FROM [cfl].[CabeceraFlete] cf
-          LEFT JOIN [cfl].[Folio] f ON f.IdFolio = cf.IdFolio
+          LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
           WHERE cf.IdCabeceraFlete = @idCabecera;
         `);
 
@@ -907,25 +909,27 @@ router.post("/folios/asignar", async (req, res, next) => {
         invalid.push({ id_cabecera_flete: idCabecera, reason: "No existe" });
         continue;
       }
-      const folioNumeroActual = String(row.folio_numero || "").trim();
-      const folioValue = row.IdFolio === null || row.IdFolio === undefined ? 0 : Number(row.IdFolio);
-      const folioEsDefault = folioNumeroActual === "0";
       const normalizedEstado = normalizeLifecycleStatus(row.Estado);
-      const estadoElegible = normalizedEstado === LIFECYCLE_STATUS.COMPLETADO
-        || (folioEsDefault && normalizedEstado === LIFECYCLE_STATUS.ASIGNADO_FOLIO);
-      if (!estadoElegible) {
+      if (normalizedEstado !== LIFECYCLE_STATUS.COMPLETADO && normalizedEstado !== LIFECYCLE_STATUS.ASIGNADO_FOLIO) {
         invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.Estado}` });
         continue;
       }
-      if (folioValue !== 0 && !folioEsDefault) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: "Ya tiene folio asignado" });
-        continue;
+      if (row.IdEmpresaTransporte) {
+        transportistaSet.add(Number(row.IdEmpresaTransporte));
       }
     }
 
     if (invalid.length > 0) {
       await transaction.rollback();
       res.status(422).json({ error: "Hay registros no elegibles", invalid });
+      return;
+    }
+
+    if (transportistaSet.size > 1) {
+      await transaction.rollback();
+      res.status(422).json({
+        error: "Los fletes seleccionados deben pertenecer al mismo transportista",
+      });
       return;
     }
 
@@ -1000,6 +1004,7 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
     const now = new Date();
     const invalid = [];
     const centerCostSet = new Set();
+    const transportistaSet = new Set();
     const salidaDates = [];
 
     for (const idCabecera of cabeceraIds) {
@@ -1012,9 +1017,9 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
             cf.IdFolio,
             cf.IdCentroCosto,
             cf.FechaSalida,
-            FolioNumero = f.FolioNumero
+            mv.IdEmpresaTransporte
           FROM [cfl].[CabeceraFlete] cf
-          LEFT JOIN [cfl].[Folio] f ON f.IdFolio = cf.IdFolio
+          LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
           WHERE cf.IdCabeceraFlete = @idCabecera;
         `);
 
@@ -1024,19 +1029,9 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         continue;
       }
 
-      const folioNumeroActual = String(row.folio_numero || "").trim();
-      const folioValue = row.IdFolio === null || row.IdFolio === undefined ? 0 : Number(row.IdFolio);
-      const folioEsDefault = folioNumeroActual === "0";
       const normalizedEstado = normalizeLifecycleStatus(row.Estado);
-      const estadoElegible = normalizedEstado === LIFECYCLE_STATUS.COMPLETADO
-        || (folioEsDefault && normalizedEstado === LIFECYCLE_STATUS.ASIGNADO_FOLIO);
-
-      if (!estadoElegible) {
+      if (normalizedEstado !== LIFECYCLE_STATUS.COMPLETADO && normalizedEstado !== LIFECYCLE_STATUS.ASIGNADO_FOLIO) {
         invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.Estado}` });
-        continue;
-      }
-      if (folioValue !== 0 && !folioEsDefault) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: "Ya tiene folio asignado" });
         continue;
       }
 
@@ -1046,6 +1041,10 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
         continue;
       }
       centerCostSet.add(idCentroCosto);
+
+      if (row.IdEmpresaTransporte) {
+        transportistaSet.add(Number(row.IdEmpresaTransporte));
+      }
 
       if (row.FechaSalida) {
         salidaDates.push(new Date(row.FechaSalida));
@@ -1058,16 +1057,16 @@ router.post("/folios/asignar-nuevo", async (req, res, next) => {
       return;
     }
 
-    const centerCosts = Array.from(centerCostSet);
-    if (centerCosts.length !== 1) {
+    if (transportistaSet.size > 1) {
       await transaction.rollback();
       res.status(422).json({
-        error: "Los movimientos seleccionados deben pertenecer al mismo centro de costo para crear un solo folio",
-        centros_costo: centerCosts,
+        error: "Los fletes seleccionados deben pertenecer al mismo transportista",
       });
       return;
     }
 
+    // Si hay múltiples CC, usar el más frecuente
+    const centerCosts = Array.from(centerCostSet);
     const idCentroCosto = Number(centerCosts[0]);
 
     const temporadaResult = await new sql.Request(transaction).query(`
