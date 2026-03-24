@@ -1,22 +1,23 @@
 const { z } = require("zod");
 
-const criterioEnum = z.enum(["centro_costo", "tipo_flete"]);
+const grupoMovimientos = z.object({
+  ids_cabecera_flete: z.array(z.coerce.number().int().positive()).min(1),
+});
 
 const previewBody = z.object({
   id_empresa: z.coerce.number().int().positive(),
-  ids_folio: z.array(z.coerce.number().int().positive()).min(1).max(500),
-  criterio: criterioEnum,
+  grupos: z.array(grupoMovimientos).min(1).max(100),
 });
 
 const generarBody = previewBody;
 
-const agregarFoliosBody = z.object({
-  ids_folio: z.array(z.coerce.number().int().positive()).min(1).max(500),
+const agregarMovimientosBody = z.object({
+  ids_cabecera_flete: z.array(z.coerce.number().int().positive()).min(1).max(500),
 });
 
 const actualizarFacturaBody = z.object({
   observaciones: z.string().max(500).optional().nullable(),
-  criterio_agrupacion: criterioEnum.optional().nullable(),
+  criterio_agrupacion: z.enum(["centro_costo", "tipo_flete"]).optional().nullable(),
 });
 
 const cambiarEstadoBody = z.object({
@@ -30,7 +31,7 @@ const idParam = z.object({
 module.exports = {
   previewBody,
   generarBody,
-  agregarFoliosBody,
+  agregarMovimientosBody,
   actualizarFacturaBody,
   cambiarEstadoBody,
   idParam,

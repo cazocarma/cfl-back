@@ -25,7 +25,6 @@ const fleteManualBody = z.object({
     numero_entrega: z.string().max(20).optional().nullable(),
     id_detalle_viaje: z.coerce.number().int().positive().optional().nullable(),
     id_productor: z.coerce.number().int().positive().optional().nullable(),
-    id_folio: z.coerce.number().int().positive().optional().nullable(),
     id_tarifa: z.coerce.number().int().positive().optional().nullable(),
     sentido_flete: z.string().max(20).optional().nullable(),
     sap_numero_entrega: z.string().max(20).optional().nullable(),

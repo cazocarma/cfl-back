@@ -55,28 +55,11 @@ function buildInClause(request, ids, prefix) {
 // ---------------------------------------------------------------------------
 
 /**
- * Retorna la subconsulta SQL que filtra folios ya incluidos en facturas no anuladas.
- * Uso tipico: `WHERE ${alias}.IdFolio NOT IN (${buildFolioExclusionFilter(alias)})`
- * @param {string} [alias='f'] - Alias de la tabla de folios en la consulta exterior.
- * @returns {string} Subconsulta SQL (sin WHERE externo, solo la expresion NOT IN).
- */
-function buildFolioExclusionFilter(alias = 'f') {
-  return `${alias}.IdFolio NOT IN (
-  SELECT ff.IdFolio
-  FROM [cfl].[FacturaFolio] ff
-  INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = ff.IdFactura
-  WHERE LOWER(fac.estado) != 'anulada'
-)`
-}
-
-/**
  * Columnas SELECT del query de movimientos (superset usado en fetchFactura).
  * @private
  */
 const MOVIMIENTOS_COLUMNS = `
       cf.IdCabeceraFlete,
-      cf.IdFolio,
-      fol.FolioNumero,
       cf.SapNumeroEntrega,
       cf.NumeroEntrega,
       cf.GuiaRemision,
@@ -101,6 +84,7 @@ const MOVIMIENTOS_COLUMNS = `
       camion_carro   = cam.SapCarro,
       tipo_camion    = tc.Nombre,
       detalle_viaje  = dv.Descripcion,
+      cf.IdProductor,
       productor_nombre = prod.Nombre,
       productor_codigo = prod.CodigoProveedor`
 
@@ -110,7 +94,6 @@ const MOVIMIENTOS_COLUMNS = `
  */
 const MOVIMIENTOS_JOINS = `
     FROM [cfl].[CabeceraFlete] cf
-    LEFT JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
     LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
     LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
     LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
@@ -143,21 +126,20 @@ function buildMovimientosQuery(whereClause, orderBy = 'cf.FechaSalida, cf.IdCabe
 // ---------------------------------------------------------------------------
 
 /**
- * Actualiza el estado de los fletes asociados a un conjunto de folios.
- * Patron duplicado en generar, agregar folios, quitar folios, eliminar y anular.
+ * Actualiza el estado de un conjunto de fletes por sus IDs.
  * @param {import('mssql').Transaction|import('mssql').Request} requestOrTransaction
  *   - Si es Transaction se crea un Request interno; si ya es Request se usa directamente.
- * @param {Array<number>} folioIds   - IDs de folios cuyos fletes se actualizan.
- * @param {string} fromEstado        - Estado actual esperado (UPPER-cased, e.g. 'ASIGNADO_FOLIO').
- * @param {string} toEstado          - Nuevo estado (e.g. 'FACTURADO').
+ * @param {Array<number>} fleteIds   - IDs de CabeceraFlete a actualizar.
+ * @param {string} fromEstado        - Estado actual esperado (e.g. 'COMPLETADO').
+ * @param {string} toEstado          - Nuevo estado (e.g. 'PREFACTURADO').
  * @param {Date} now                 - Timestamp para FechaActualizacion.
  * @returns {Promise<import('mssql').IResult<any>>} Resultado del UPDATE.
  */
-async function updateFletesEstado(requestOrTransaction, folioIds, fromEstado, toEstado, now) {
-  if (!folioIds.length) return null
+async function updateFletesEstado(requestOrTransaction, fleteIds, fromEstado, toEstado, now) {
+  if (!fleteIds.length) return null
 
   // Validar estados para prevenir inyección SQL (solo valores conocidos)
-  const VALID_STATES = ['ASIGNADO_FOLIO', 'FACTURADO', 'COMPLETADO', 'DETECTADO']
+  const VALID_STATES = ['PREFACTURADO', 'FACTURADO', 'COMPLETADO', 'DETECTADO']
   if (!VALID_STATES.includes(fromEstado) || !VALID_STATES.includes(toEstado)) {
     throw new Error(`Estado inválido: from=${fromEstado}, to=${toEstado}`)
   }
@@ -168,12 +150,12 @@ async function updateFletesEstado(requestOrTransaction, folioIds, fromEstado, to
     : requestOrTransaction
 
   req.input('updatedAt', sql.DateTime2(0), now)
-  const inFragment = buildInClause(req, folioIds, 'uf')
+  const inFragment = buildInClause(req, fleteIds, 'uf')
 
   return req.query(`
     UPDATE [cfl].[CabeceraFlete]
     SET estado = '${toEstado}', FechaActualizacion = @updatedAt
-    WHERE IdFolio IN (${inFragment})
+    WHERE IdCabeceraFlete IN (${inFragment})
       AND UPPER(estado) = '${fromEstado}';
   `)
 }
@@ -183,7 +165,6 @@ module.exports = {
   toN,
   calcMontos,
   buildInClause,
-  buildFolioExclusionFilter,
   buildMovimientosQuery,
   updateFletesEstado,
 }

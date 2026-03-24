@@ -16,7 +16,6 @@ const {
 } = require("../utils/lifecycle");
 const {
   resolveMovilId,
-  resolveFolioForLifecycle,
   resolveImputacionFlete,
 } = require("../helpers");
 
@@ -590,7 +589,7 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", async (req, res, nex
   }
 });
 
-router.get("/fletes/completos-sin-folio", async (req, res, next) => {
+router.get("/fletes/completados", async (req, res, next) => {
   const page = parsePositiveInt(req.query.page, 1);
   const pageSize = clamp(parsePositiveInt(req.query.page_size, 25), 1, 500);
   const offset = (page - 1) * pageSize;
@@ -620,8 +619,6 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
       base AS (
       SELECT
         cf.IdCabeceraFlete,
-        cf.IdFolio,
-        FolioNumero = fol.FolioNumero,
         cf.Estado AS estado_original,
         cf.TipoMovimiento,
         cf.FechaSalida,
@@ -679,9 +676,7 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
         estado_lifecycle = CASE
           WHEN UPPER(ISNULL(cf.Estado, '')) = 'ANULADO' THEN 'ANULADO'
           WHEN UPPER(ISNULL(cf.Estado, '')) = 'FACTURADO' THEN 'FACTURADO'
-          WHEN COALESCE(cf.IdFolio, 0) > 0
-            AND ISNULL(LTRIM(RTRIM(CAST(fol.FolioNumero AS NVARCHAR(50)))), '') <> '0'
-            THEN 'ASIGNADO_FOLIO'
+          WHEN UPPER(ISNULL(cf.Estado, '')) = 'PREFACTURADO' THEN 'PREFACTURADO'
           WHEN lk.FechaCreacion IS NOT NULL AND cf.FechaActualizacion IS NOT NULL AND lk.FechaCreacion > cf.FechaActualizacion THEN 'ACTUALIZADO'
           WHEN cf.IdTipoFlete IS NOT NULL
             AND cf.IdCentroCosto IS NOT NULL
@@ -692,7 +687,6 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
           ELSE 'EN_REVISION'
         END
       FROM [cfl].[CabeceraFlete] cf
-      LEFT JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
       LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
@@ -732,8 +726,6 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
       SELECT
         total_rows = COUNT_BIG(1) OVER(),
         IdCabeceraFlete,
-        IdFolio,
-        FolioNumero,
         Estado = estado_lifecycle,
         estado_original,
         TipoMovimiento,
@@ -817,415 +809,6 @@ router.get("/fletes/completos-sin-folio", async (req, res, next) => {
       },
     });
   } catch (error) {
-    next(error);
-  }
-});
-
-router.post("/folios/asignar", async (req, res, next) => {
-  let authzContext = null;
-  try {
-    authzContext = await resolveAuthzContext(req);
-  } catch (error) {
-    next(error);
-    return;
-  }
-
-  if (!hasAnyPermission(authzContext, ["folios.asignar", "folios.admin"])) {
-    res.status(403).json({
-      error: "No tienes permisos para asignar folios",
-      role: authzContext?.primaryRole || null,
-    });
-    return;
-  }
-
-  const body = req.body || {};
-  const idFolio = Number(body.id_folio);
-  const ids = Array.isArray(body.ids_cabecera_flete) ? body.ids_cabecera_flete : [];
-
-  if (!Number.isInteger(idFolio) || idFolio <= 0) {
-    res.status(400).json({ error: "id_folio invalido" });
-    return;
-  }
-
-  const cabeceraIds = ids.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
-  if (cabeceraIds.length === 0) {
-    res.status(400).json({ error: "Debes enviar ids_cabecera_flete" });
-    return;
-  }
-
-  let transaction;
-
-  try {
-    const pool = await getPool();
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
-
-    const now = new Date();
-
-    const folioResult = await new sql.Request(transaction)
-      .input("idFolio", sql.BigInt, idFolio)
-      .query(`
-        SELECT TOP 1 IdFolio, Bloqueado, Estado, FolioNumero
-        FROM [cfl].[Folio]
-        WHERE IdFolio = @idFolio;
-      `);
-
-    const folio = folioResult.recordset[0];
-    if (!folio) {
-      await transaction.rollback();
-      res.status(404).json({ error: "Folio no encontrado" });
-      return;
-    }
-
-    if (folio.Bloqueado === true || folio.Bloqueado === 1) {
-      await transaction.rollback();
-      res.status(409).json({ error: "El folio esta bloqueado" });
-      return;
-    }
-
-    const targetFolioNumero = String(folio.FolioNumero || "").trim();
-    const targetFolioIsDefault = targetFolioNumero === "0";
-
-    // Validar fletes: deben existir, estar COMPLETADO y ser del mismo transportista
-    const invalid = [];
-    const transportistaSet = new Set();
-
-    for (const idCabecera of cabeceraIds) {
-      const rowResult = await new sql.Request(transaction)
-        .input("idCabecera", sql.BigInt, idCabecera)
-        .query(`
-          SELECT TOP 1
-            cf.IdCabeceraFlete,
-            cf.Estado,
-            cf.IdFolio,
-            mv.IdEmpresaTransporte
-          FROM [cfl].[CabeceraFlete] cf
-          LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
-          WHERE cf.IdCabeceraFlete = @idCabecera;
-        `);
-
-      const row = rowResult.recordset[0];
-      if (!row) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: "No existe" });
-        continue;
-      }
-      const normalizedEstado = normalizeLifecycleStatus(row.Estado);
-      if (normalizedEstado !== LIFECYCLE_STATUS.COMPLETADO && normalizedEstado !== LIFECYCLE_STATUS.ASIGNADO_FOLIO) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.Estado}` });
-        continue;
-      }
-      if (row.IdEmpresaTransporte) {
-        transportistaSet.add(Number(row.IdEmpresaTransporte));
-      }
-    }
-
-    if (invalid.length > 0) {
-      await transaction.rollback();
-      res.status(422).json({ error: "Hay registros no elegibles", invalid });
-      return;
-    }
-
-    if (transportistaSet.size > 1) {
-      await transaction.rollback();
-      res.status(422).json({
-        error: "Los fletes seleccionados deben pertenecer al mismo transportista",
-      });
-      return;
-    }
-
-    for (const idCabecera of cabeceraIds) {
-      await new sql.Request(transaction)
-        .input("idCabecera", sql.BigInt, idCabecera)
-        .input("idFolio", sql.BigInt, idFolio)
-        .input("estadoAsignado", sql.VarChar(20), targetFolioIsDefault ? LIFECYCLE_STATUS.COMPLETADO : LIFECYCLE_STATUS.ASIGNADO_FOLIO)
-        .input("updatedAt", sql.DateTime2(0), now)
-        .query(`
-          UPDATE [cfl].[CabeceraFlete]
-          SET IdFolio = @idFolio,
-              Estado = @estadoAsignado,
-              FechaActualizacion = @updatedAt
-          WHERE IdCabeceraFlete = @idCabecera;
-        `);
-    }
-
-    await transaction.commit();
-
-    res.json({
-      message: "Folio asignado",
-      data: {
-        id_folio: idFolio,
-        updated: cabeceraIds.length,
-      },
-    });
-  } catch (error) {
-    if (transaction) {
-      try {
-        await transaction.rollback();
-      } catch (_rollbackError) {
-        // no-op
-      }
-    }
-    next(error);
-  }
-});
-
-router.post("/folios/asignar-nuevo", async (req, res, next) => {
-  let authzContext = null;
-  try {
-    authzContext = await resolveAuthzContext(req);
-  } catch (error) {
-    next(error);
-    return;
-  }
-
-  if (!hasAnyPermission(authzContext, ["folios.asignar", "folios.admin"])) {
-    res.status(403).json({
-      error: "No tienes permisos para asignar folios",
-      role: authzContext?.primaryRole || null,
-    });
-    return;
-  }
-
-  const body = req.body || {};
-  const ids = Array.isArray(body.ids_cabecera_flete) ? body.ids_cabecera_flete : [];
-  const cabeceraIds = ids.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
-  if (cabeceraIds.length === 0) {
-    res.status(400).json({ error: "Debes enviar ids_cabecera_flete" });
-    return;
-  }
-
-  let transaction;
-
-  try {
-    const pool = await getPool();
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
-
-    const now = new Date();
-    const invalid = [];
-    const centerCostSet = new Set();
-    const transportistaSet = new Set();
-    const salidaDates = [];
-
-    for (const idCabecera of cabeceraIds) {
-      const rowResult = await new sql.Request(transaction)
-        .input("idCabecera", sql.BigInt, idCabecera)
-        .query(`
-          SELECT TOP 1
-            cf.IdCabeceraFlete,
-            cf.Estado,
-            cf.IdFolio,
-            cf.IdCentroCosto,
-            cf.FechaSalida,
-            mv.IdEmpresaTransporte
-          FROM [cfl].[CabeceraFlete] cf
-          LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
-          WHERE cf.IdCabeceraFlete = @idCabecera;
-        `);
-
-      const row = rowResult.recordset[0];
-      if (!row) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: "No existe" });
-        continue;
-      }
-
-      const normalizedEstado = normalizeLifecycleStatus(row.Estado);
-      if (normalizedEstado !== LIFECYCLE_STATUS.COMPLETADO && normalizedEstado !== LIFECYCLE_STATUS.ASIGNADO_FOLIO) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: `Estado invalido: ${row.Estado}` });
-        continue;
-      }
-
-      const idCentroCosto = Number(row.IdCentroCosto || 0);
-      if (!Number.isInteger(idCentroCosto) || idCentroCosto <= 0) {
-        invalid.push({ id_cabecera_flete: idCabecera, reason: "Centro de costo invalido" });
-        continue;
-      }
-      centerCostSet.add(idCentroCosto);
-
-      if (row.IdEmpresaTransporte) {
-        transportistaSet.add(Number(row.IdEmpresaTransporte));
-      }
-
-      if (row.FechaSalida) {
-        salidaDates.push(new Date(row.FechaSalida));
-      }
-    }
-
-    if (invalid.length > 0) {
-      await transaction.rollback();
-      res.status(422).json({ error: "Hay registros no elegibles", invalid });
-      return;
-    }
-
-    if (transportistaSet.size > 1) {
-      await transaction.rollback();
-      res.status(422).json({
-        error: "Los fletes seleccionados deben pertenecer al mismo transportista",
-      });
-      return;
-    }
-
-    // Si hay múltiples CC, usar el más frecuente
-    const centerCosts = Array.from(centerCostSet);
-    const idCentroCosto = Number(centerCosts[0]);
-
-    const temporadaResult = await new sql.Request(transaction).query(`
-      SELECT TOP 1 IdTemporada
-      FROM [cfl].[Temporada]
-      WHERE Activa = 1
-      ORDER BY CASE WHEN ISNULL(Cerrada, 0) = 0 THEN 0 ELSE 1 END, FechaInicio DESC, IdTemporada DESC;
-    `);
-
-    const idTemporada = Number(temporadaResult.recordset[0]?.IdTemporada || 0);
-    if (!Number.isInteger(idTemporada) || idTemporada <= 0) {
-      await transaction.rollback();
-      res.status(409).json({ error: "No existe una temporada activa para crear folio" });
-      return;
-    }
-
-    // Bloquea la temporada para serializar la generacion del correlativo por temporada.
-    const temporadaLockResult = await new sql.Request(transaction)
-      .input("idTemporada", sql.BigInt, idTemporada)
-      .query(`
-        SELECT TOP 1 IdTemporada
-        FROM [cfl].[Temporada] WITH (UPDLOCK, HOLDLOCK)
-        WHERE IdTemporada = @idTemporada;
-      `);
-
-    if (!temporadaLockResult.recordset[0]) {
-      await transaction.rollback();
-      res.status(409).json({ error: "La temporada activa ya no existe para crear folio" });
-      return;
-    }
-
-    const nextNumberResult = await new sql.Request(transaction)
-      .input("idTemporada", sql.BigInt, idTemporada)
-      .query(`
-        SELECT
-          next_num = COALESCE(MAX(TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(FolioNumero)), ''))), 0) + 1
-        FROM [cfl].[Folio] WITH (UPDLOCK, HOLDLOCK)
-        WHERE IdTemporada = @idTemporada
-          AND TRY_CONVERT(BIGINT, NULLIF(LTRIM(RTRIM(FolioNumero)), '')) IS NOT NULL;
-      `);
-
-    const folioNumero = String(nextNumberResult.recordset[0]?.next_num || "1");
-    const periodoDesde = salidaDates.length > 0
-      ? new Date(Math.min(...salidaDates.map((d) => d.getTime())))
-      : null;
-    const periodoHasta = salidaDates.length > 0
-      ? new Date(Math.max(...salidaDates.map((d) => d.getTime())))
-      : null;
-
-    // Resolver IdCuentaMayor desde ImputacionFlete usando (IdTipoFlete, IdCentroCosto) de los movimientos.
-    // Si todos los movimientos convergen en una sola cuenta mayor activa, se asigna al folio.
-    const inParamsCuenta = cabeceraIds.map((_, i) => `@cb${i}`).join(",");
-    const cuentaReq = new sql.Request(transaction);
-    cabeceraIds.forEach((id, i) => cuentaReq.input(`cb${i}`, sql.BigInt, id));
-    const cuentaMayorResult = await cuentaReq.query(`
-      SELECT DISTINCT imp.IdCuentaMayor
-      FROM [cfl].[CabeceraFlete] cf
-      INNER JOIN [cfl].[ImputacionFlete] imp
-        ON imp.IdTipoFlete = cf.IdTipoFlete
-        AND imp.IdCentroCosto = cf.IdCentroCosto
-        AND imp.Activo = 1
-      WHERE cf.IdCabeceraFlete IN (${inParamsCuenta});
-    `);
-    const cuentaRows = cuentaMayorResult.recordset;
-    const idCuentaMayor = cuentaRows.length === 1 ? Number(cuentaRows[0].IdCuentaMayor) : null;
-
-    const createFolioReq = new sql.Request(transaction)
-      .input("idCentroCosto", sql.BigInt, idCentroCosto)
-      .input("idTemporada", sql.BigInt, idTemporada)
-      .input("folioNumero", sql.VarChar(30), folioNumero)
-      .input("periodoDesde", sql.DateTime2(0), periodoDesde)
-      .input("periodoHasta", sql.DateTime2(0), periodoHasta)
-      .input("estado", sql.VarChar(20), "ABIERTO")
-      .input("bloqueado", sql.Bit, false)
-      .input("createdAt", sql.DateTime2(0), now)
-      .input("updatedAt", sql.DateTime2(0), now);
-
-    if (idCuentaMayor) {
-      createFolioReq.input("idCuentaMayor", sql.BigInt, idCuentaMayor);
-    }
-
-    const createFolioResult = await createFolioReq.query(`
-        INSERT INTO [cfl].[Folio] (
-          [IdCentroCosto],
-          ${idCuentaMayor ? '[IdCuentaMayor],' : ''}
-          [IdTemporada],
-          [FolioNumero],
-          [PeriodoDesde],
-          [PeriodoHasta],
-          [Estado],
-          [Bloqueado],
-          [FechaCreacion],
-          [FechaActualizacion]
-        )
-        OUTPUT INSERTED.IdFolio
-        VALUES (
-          @idCentroCosto,
-          ${idCuentaMayor ? '@idCuentaMayor,' : ''}
-          @idTemporada,
-          @folioNumero,
-          @periodoDesde,
-          @periodoHasta,
-          @estado,
-          @bloqueado,
-          @createdAt,
-          @updatedAt
-        );
-      `);
-
-    const idFolio = Number(createFolioResult.recordset[0]?.IdFolio || 0);
-    if (!Number.isInteger(idFolio) || idFolio <= 0) {
-      await transaction.rollback();
-      res.status(500).json({ error: "No se pudo crear el folio" });
-      return;
-    }
-
-    for (const idCabecera of cabeceraIds) {
-      await new sql.Request(transaction)
-        .input("idCabecera", sql.BigInt, idCabecera)
-        .input("idFolio", sql.BigInt, idFolio)
-        .input("estadoAsignado", sql.VarChar(20), LIFECYCLE_STATUS.ASIGNADO_FOLIO)
-        .input("updatedAt", sql.DateTime2(0), now)
-        .query(`
-          UPDATE [cfl].[CabeceraFlete]
-          SET IdFolio = @idFolio,
-              Estado = @estadoAsignado,
-              FechaActualizacion = @updatedAt
-          WHERE IdCabeceraFlete = @idCabecera;
-        `);
-    }
-
-    await transaction.commit();
-
-    res.json({
-      message: "Nuevo folio creado y asignado",
-      data: {
-        id_folio: idFolio,
-        folio_numero: folioNumero,
-        id_temporada: idTemporada,
-        id_centro_costo: idCentroCosto,
-        id_cuenta_mayor: idCuentaMayor,
-        updated: cabeceraIds.length,
-      },
-    });
-  } catch (error) {
-    if (transaction) {
-      try {
-        await transaction.rollback();
-      } catch (_rollbackError) {
-        // no-op
-      }
-    }
-
-    const sqlCode = error?.number || error?.originalError?.info?.number || null;
-    if (sqlCode === 2601 || sqlCode === 2627) {
-      res.status(409).json({ error: "Conflicto al generar folio. Reintenta la asignacion." });
-      return;
-    }
-
     next(error);
   }
 });
@@ -1591,7 +1174,6 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
   const montoExtraRaw = cabeceraIn.monto_extra;
   const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
-  const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
   const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
   const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
@@ -1643,10 +1225,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     }
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
-    const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
     const estado = deriveLifecycleStatus({
       requestedStatus,
-      idFolio: lifecycleFolioId,
       idTipoFlete,
       idCentroCosto,
       idDetalleViaje,
@@ -1759,7 +1339,6 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
 
     const insertCabeceraReq = new sql.Request(transaction);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
-    insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), entrega.sap_numero_entrega);
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFleteSug ? sapTipoFleteSug.slice(0, 4) : null);
     insertCabeceraReq.input("sapCentroCosto", sql.Char(10), sapCentroCostoSug ? sapCentroCostoSug.slice(0, 10) : null);
@@ -1792,7 +1371,6 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
         [IdDetalleViaje],
-        [IdFolio],
         [SapNumeroEntrega],
         [SapCodigoTipoFlete],
         [SapCentroCosto],
@@ -1822,7 +1400,6 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", async (req, res, next
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
         @idDetalleViaje,
-        @idFolio,
         @sapNumeroEntrega,
         @sapCodigoTipoFlete,
         @sapCentroCosto,

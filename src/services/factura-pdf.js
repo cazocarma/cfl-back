@@ -126,36 +126,38 @@ function generatePreFacturaPdf(factura, outputStream) {
   // ── Encabezado (barra verde) ──────────────────────────────────────────────
 
   doc.rect(0, 0, PAGE_W, HEADER_BAR_H).fill(BRAND_COLOR);
-  doc.fontSize(13).font('Helvetica-Bold').fillColor('#ffffff')
-    .text('Greenvic SPA', MARGIN_L + 8, 6, { width: 300 });
-  doc.fontSize(8).font('Helvetica').fillColor('#d1fae5')
-    .text('CFL — Control de Fletes', MARGIN_L + 8, 22, { width: 300 });
-  doc.fontSize(6.5).fillColor('#a7f3d0')
-    .text(`RUT: ${GREENVIC_RUT}`, MARGIN_L + 8, 34, { width: 300 });
 
-  // PRE FACTURA (derecha)
+  // Izquierda: PRE FACTURA (grande) + número
   doc.fontSize(20).font('Helvetica-Bold').fillColor('#ffffff')
-    .text('PRE FACTURA', PAGE_W - MARGIN_R - 240, 6, { width: 232, align: 'right' });
+    .text('PRE FACTURA', MARGIN_L, 6, { width: 300 });
   doc.fontSize(10).font('Helvetica').fillColor('#a7f3d0')
-    .text(factura.numero_factura, PAGE_W - MARGIN_R - 240, 30, { width: 232, align: 'right' });
+    .text(factura.numero_factura, MARGIN_L, 30, { width: 300 });
 
-  // ── Metadata ──────────────────────────────────────────────────────────────
+  // Derecha: Greenvic SPA + dirección + RUT
+  doc.fontSize(10).font('Helvetica-Bold').fillColor('#ffffff')
+    .text('Greenvic SPA', PAGE_W - MARGIN_R - 240, 6, { width: 232, align: 'right' });
+  doc.fontSize(6.5).font('Helvetica').fillColor('#d1fae5')
+    .text('Apoquindo 4700 Of. 901, Las Condes, Santiago', PAGE_W - MARGIN_R - 240, 19, { width: 232, align: 'right' });
+  doc.fontSize(6.5).fillColor('#a7f3d0')
+    .text(`RUT: ${GREENVIC_RUT}`, PAGE_W - MARGIN_R - 240, 30, { width: 232, align: 'right' });
+
+  // ── Metadata (una sola columna) ─────────────────────────────────────────
 
   doc.fillColor('#000000');
   let infoY = 58;
   doc.font('Helvetica-Bold').fontSize(8)
     .text(factura.empresa_nombre, MARGIN_L, infoY);
   doc.font('Helvetica').fontSize(7);
-  doc.text(`RUT: ${factura.empresa_rut || '-'}`, MARGIN_L + 200, infoY);
-  doc.text(`Fecha emisión: ${formatDate(factura.fecha_emision)}`, MARGIN_L, infoY + 11);
-  doc.text(`Moneda: ${factura.moneda}`, MARGIN_L + 200, infoY + 11);
+  doc.text(`RUT: ${factura.empresa_rut || '-'}`, MARGIN_L, infoY + 11);
+  doc.text(`Fecha emisión: ${formatDate(factura.fecha_emision)}`, MARGIN_L, infoY + 22);
+  doc.text(`Moneda: ${factura.moneda}`, MARGIN_L, infoY + 33);
 
   if (factura.observaciones) {
-    doc.text(`Obs: ${factura.observaciones}`, MARGIN_L, infoY + 22, { width: CONTENT_W });
+    doc.text(`Obs: ${factura.observaciones}`, MARGIN_L, infoY + 44, { width: CONTENT_W });
     infoY += 12;
   }
 
-  infoY += 28;
+  infoY += 40;
   doc.moveTo(MARGIN_L, infoY).lineTo(PAGE_W - MARGIN_R, infoY)
     .lineWidth(0.5).strokeColor('#c4c4c4').stroke();
   infoY += 5;

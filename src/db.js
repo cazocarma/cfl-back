@@ -87,10 +87,12 @@ function createPool(database) {
       trustServerCertificate: true,
     },
     pool: {
-      min: 0,
-      max: 10,
+      min: 2,
+      max: 20,
+      acquireTimeoutMillis: 30000,
       idleTimeoutMillis: 30000,
     },
+    requestTimeout: 30000,
   });
 
   return pool.connect();

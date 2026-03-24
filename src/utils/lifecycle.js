@@ -10,7 +10,7 @@ const LIFECYCLE_STATUS = {
   ANULADO: "ANULADO",
   EN_REVISION: "EN_REVISION",
   COMPLETADO: "COMPLETADO",
-  ASIGNADO_FOLIO: "ASIGNADO_FOLIO",
+  PREFACTURADO: "PREFACTURADO",
   FACTURADO: "FACTURADO",
 };
 
@@ -24,7 +24,7 @@ function normalizeLifecycleStatus(rawStatus) {
   if (!normalized) return null;
 
   if (normalized === "COMPLETO") return LIFECYCLE_STATUS.COMPLETADO;
-  if (normalized === "VALIDADO") return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
+  if (normalized === "VALIDADO") return LIFECYCLE_STATUS.PREFACTURADO;
   if (normalized === "CERRADO") return LIFECYCLE_STATUS.FACTURADO;
 
   return Object.values(LIFECYCLE_STATUS).includes(normalized) ? normalized : null;
@@ -36,7 +36,6 @@ function normalizeLifecycleStatus(rawStatus) {
  */
 function deriveLifecycleStatus({
   requestedStatus,
-  idFolio,
   idTipoFlete,
   idCentroCosto,
   idDetalleViaje,
@@ -46,7 +45,7 @@ function deriveLifecycleStatus({
 }) {
   if (requestedStatus === LIFECYCLE_STATUS.ANULADO) return LIFECYCLE_STATUS.ANULADO;
   if (requestedStatus === LIFECYCLE_STATUS.FACTURADO) return LIFECYCLE_STATUS.FACTURADO;
-  if (idFolio && Number(idFolio) > 0) return LIFECYCLE_STATUS.ASIGNADO_FOLIO;
+  if (requestedStatus === LIFECYCLE_STATUS.PREFACTURADO) return LIFECYCLE_STATUS.PREFACTURADO;
 
   const isComplete =
     Boolean(idTipoFlete) &&

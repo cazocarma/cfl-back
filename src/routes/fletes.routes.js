@@ -13,7 +13,6 @@ const {
 } = require("../utils/lifecycle");
 const {
   resolveMovilId,
-  resolveFolioForLifecycle,
   resolveImputacionFlete,
 } = require("../helpers");
 const { validate } = require("../middleware/validate.middleware");
@@ -220,7 +219,6 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
   const numeroEntrega = toNullableTrimmedString(cabeceraIn.numero_entrega);
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idProductor = parseOptionalBigInt(cabeceraIn.id_productor);
-  const idFolio = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
   const sentidoFlete = toNullableTrimmedString(cabeceraIn.sentido_flete);
 
@@ -270,10 +268,8 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
     }
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
-    const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
     const estado = deriveLifecycleStatus({
       requestedStatus,
-      idFolio: lifecycleFolioId,
       idTipoFlete,
       idCentroCosto,
       idDetalleViaje,
@@ -284,7 +280,6 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
 
     const insertCabeceraReq = new sql.Request(transaction);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
-    insertCabeceraReq.input("idFolio", sql.BigInt, idFolio);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.sap_numero_entrega));
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete));
     insertCabeceraReq.input("sapCentroCosto", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo));
@@ -313,7 +308,6 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
         [IdDetalleViaje],
-        [IdFolio],
         [SapNumeroEntrega],
         [SapCodigoTipoFlete],
         [SapCentroCosto],
@@ -342,7 +336,6 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
         @idDetalleViaje,
-        @idFolio,
         @sapNumeroEntrega,
         @sapCodigoTipoFlete,
         @sapCentroCosto,
@@ -454,7 +447,6 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
   const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const idDetalleViajeIn = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
   const idProductorIn = parseOptionalBigInt(cabeceraIn.id_productor);
-  const idFolioIn = parseOptionalBigInt(cabeceraIn.id_folio);
   const idTarifaIn = parseOptionalBigInt(cabeceraIn.id_tarifa);
   const guiaRemisionIn = toNullableTrimmedString(cabeceraIn.guia_remision);
   const numeroEntregaIn = toNullableTrimmedString(cabeceraIn.numero_entrega);
@@ -512,7 +504,6 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
 
     const idDetalleViaje = idDetalleViajeIn ?? existing.IdDetalleViaje ?? null;
     const idProductor = idProductorIn ?? existing.IdProductor ?? null;
-    const idFolio = idFolioIn ?? existing.IdFolio ?? null;
     const idTarifa = idTarifaIn ?? existing.IdTarifa ?? null;
     const imputacion = await resolveImputacionFlete(transaction, {
       idTipoFlete,
@@ -531,13 +522,11 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
     }
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now, existing.IdMovil ?? null);
-    const lifecycleFolioId = await resolveFolioForLifecycle(transaction, idFolio);
     const guiaRemision  = guiaRemisionIn  ?? (existing.GuiaRemision  ? String(existing.GuiaRemision)  : null);
     const numeroEntrega = numeroEntregaIn ?? (existing.NumeroEntrega ? String(existing.NumeroEntrega) : null);
     const sentidoFlete = sentidoFleteIn ?? (existing.SentidoFlete ? String(existing.SentidoFlete) : null);
     const estado = deriveLifecycleStatus({
       requestedStatus,
-      idFolio: lifecycleFolioId,
       idTipoFlete,
       idCentroCosto,
       idDetalleViaje,
@@ -557,7 +546,6 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
       .input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null)
       .input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null)
       .input("idDetalleViaje", sql.BigInt, idDetalleViaje)
-      .input("idFolio", sql.BigInt, idFolio)
       .input("idMovil", sql.BigInt, idMovil)
       .input("idTarifa", sql.BigInt, idTarifa)
       .input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones))
@@ -580,7 +568,6 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
           GuiaRemision = @guiaRemision,
           NumeroEntrega = @numeroEntrega,
           IdDetalleViaje = @idDetalleViaje,
-          IdFolio = @idFolio,
           IdMovil = @idMovil,
           IdTarifa = @idTarifa,
           Observaciones = @observaciones,

@@ -67,29 +67,6 @@ async function resolveMovilId(transaction, cabeceraIn, now, fallbackMovilId = nu
   return Number(created.recordset[0].IdMovil);
 }
 
-/**
- * Devuelve el id_folio si es válido y no es el folio reservado (folio_numero = 0).
- * Usado para determinar si el flete debe quedar en estado ASIGNADO_FOLIO.
- */
-async function resolveFolioForLifecycle(transaction, idFolio) {
-  const parsed = Number(idFolio);
-  if (!Number.isInteger(parsed) || parsed <= 0) return null;
-
-  const result = await new sql.Request(transaction)
-    .input("idFolio", sql.BigInt, parsed)
-    .query(`
-      SELECT TOP 1 FolioNumero
-      FROM [cfl].[Folio]
-      WHERE IdFolio = @idFolio;
-    `);
-
-  const row = result.recordset[0] || null;
-  if (!row) return parsed;
-
-  const numero = String(row.FolioNumero || "").trim();
-  return numero === "0" ? null : parsed;
-}
-
 function buildDomainError(message, statusCode = 422) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -258,7 +235,6 @@ async function resolveImputacionFlete(transaction, {
 module.exports = {
   buildDomainError,
   resolveMovilId,
-  resolveFolioForLifecycle,
   resolveImputacionFlete,
   // Re-exports for convenience (use direct imports from utils/ for new code)
   LIFECYCLE_STATUS,

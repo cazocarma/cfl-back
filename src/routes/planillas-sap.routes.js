@@ -133,13 +133,11 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       }
     }
 
-    // Fetch movements grouped by (folio, centro_costo, cuenta_mayor) then by producer
+    // Fetch movements grouped by (centro_costo, cuenta_mayor) then by producer
     const movData = await pool.request()
       .input('idFactura', sql.BigInt, id_factura)
       .query(`
         SELECT
-          cf.IdFolio,
-          fol.FolioNumero,
           cf.IdCentroCosto, cc.SapCodigo AS CentroCostoCodigo,
           cf.IdCuentaMayor, cm.Codigo AS CuentaMayorCodigo,
           cf.IdProductor,
@@ -152,22 +150,20 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
             WHERE df.IdCabeceraFlete IN (
               SELECT MIN(cf2.IdCabeceraFlete)
               FROM [cfl].[CabeceraFlete] cf2
-              WHERE cf2.IdFolio = cf.IdFolio AND cf2.IdProductor = cf.IdProductor
+              WHERE cf2.IdFactura = cf.IdFactura AND cf2.IdProductor = cf.IdProductor
                 AND cf2.IdCentroCosto = cf.IdCentroCosto
             )
           )
-        FROM [cfl].[FacturaFolio] ff
-        INNER JOIN [cfl].[CabeceraFlete] cf ON cf.IdFolio = ff.IdFolio
-        INNER JOIN [cfl].[Folio] fol ON fol.IdFolio = cf.IdFolio
+        FROM [cfl].[CabeceraFlete] cf
         LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
         LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
         LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
-        WHERE ff.IdFactura = @idFactura
-          AND UPPER(cf.Estado) IN ('FACTURADO', 'ASIGNADO_FOLIO')
-        GROUP BY cf.IdFolio, fol.FolioNumero, cf.IdCentroCosto, cc.SapCodigo,
+        WHERE cf.IdFactura = @idFactura
+          AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO')
+        GROUP BY cf.IdFactura, cf.IdCentroCosto, cc.SapCodigo,
                  cf.IdCuentaMayor, cm.Codigo, cf.IdProductor,
                  prod.CodigoProveedor, prod.Nombre
-        ORDER BY cf.IdFolio, cc.SapCodigo, prod.Nombre;
+        ORDER BY cc.SapCodigo, prod.Nombre;
       `);
 
     if (!movData.recordset.length) {
@@ -175,14 +171,12 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       return;
     }
 
-    // Group into SAP documents: each unique (IdFolio, CentroCostoCodigo) = 1 document
+    // Group into SAP documents: each unique CentroCostoCodigo = 1 document
     const docGroups = new Map();
     for (const row of movData.recordset) {
-      const key = `${row.id_folio}_${row.centro_costo_codigo || 'SIN_CC'}`;
+      const key = `${row.centro_costo_codigo || 'SIN_CC'}`;
       if (!docGroups.has(key)) {
         docGroups.set(key, {
-          id_folio: row.id_folio,
-          folio_numero: row.folio_numero,
           id_centro_costo: row.id_centro_costo,
           centro_costo_codigo: row.centro_costo_codigo,
           id_cuenta_mayor: row.id_cuenta_mayor,
@@ -236,8 +230,6 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       const insertDoc = await new sql.Request(transaction)
         .input('idPlanilla', sql.BigInt, idPlanilla)
         .input('numDoc', sql.Int, docNum)
-        .input('idFolio', sql.BigInt, group.id_folio)
-        .input('folioNum', sql.NVarChar(30), group.folio_numero)
         .input('idCC', sql.BigInt, group.id_centro_costo)
         .input('ccCodigo', sql.NVarChar(20), group.centro_costo_codigo)
         .input('idCM', sql.BigInt, group.id_cuenta_mayor)
@@ -246,18 +238,18 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
         .input('totalLineas', sql.Int, 1 + group.productores.length)
         .query(`
           INSERT INTO [cfl].[PlanillaSapDocumento]
-            (IdPlanillaSap, NumeroDocumento, IdFolio, FolioNumero,
+            (IdPlanillaSap, NumeroDocumento,
              IdCentroCosto, CentroCostoCodigo, IdCuentaMayor, CuentaMayorCodigo,
              MontoDebito, TotalLineas)
           OUTPUT INSERTED.IdPlanillaSapDocumento
           VALUES
-            (@idPlanilla, @numDoc, @idFolio, @folioNum,
+            (@idPlanilla, @numDoc,
              @idCC, @ccCodigo, @idCM, @cmCodigo, @montoDebito, @totalLineas);
         `);
       const idDoc = Number(insertDoc.recordset[0].id_planilla_sap_documento);
 
       let lineNum = 0;
-      const textoLinea = `FLETES FOLIO ${group.folio_numero || ''}`.trim();
+      const textoLinea = `FLETES PREFACTURA ${id_factura}`.trim();
 
       // Debit line (header)
       lineNum++;

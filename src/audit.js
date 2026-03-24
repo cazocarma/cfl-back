@@ -189,7 +189,6 @@ function findEntityId(value, depth = 0) {
     "id",
     "id_auditoria",
     "id_factura",
-    "id_folio",
     "id_cabecera_flete",
     "id_usuario",
   ];

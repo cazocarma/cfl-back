@@ -436,58 +436,6 @@ const MAINTAINERS = {
       allowed: ["Codigo", "Glosa"]
     }
   },
-  folios: {
-    title: "Folios",
-    table: "[cfl].[Folio]",
-    alias: "t",
-    idColumn: "IdFolio",
-    from: "[cfl].[Folio] t INNER JOIN [cfl].[Temporada] tp ON tp.IdTemporada = t.IdTemporada INNER JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = t.IdCentroCosto LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = t.IdCuentaMayor",
-    orderBy: "t.FechaCreacion DESC",
-    listColumns: [
-      "t.IdFolio",
-      "t.IdCentroCosto",
-      "cc.SapCodigo AS CentroCostoSapCodigo",
-      "cc.Nombre AS CentroCostoNombre",
-      "t.IdCuentaMayor",
-      "cm.Codigo AS CuentaMayorCodigo",
-      "cm.Glosa AS CuentaMayorGlosa",
-      "t.IdTemporada",
-      "tp.Codigo AS TemporadaCodigo",
-      "t.FolioNumero",
-      "t.PeriodoDesde",
-      "t.PeriodoHasta",
-      "t.Estado",
-      "t.Bloqueado",
-      "t.FechaCierre",
-      "t.ResultadoCuadratura",
-      "t.ResumenCuadratura",
-      "t.FechaCreacion",
-      "t.FechaActualizacion"
-    ],
-    create: {
-      required: ["IdCentroCosto", "IdTemporada", "IdCuentaMayor", "FolioNumero", "Estado"],
-      optional: ["PeriodoDesde", "PeriodoHasta", "Bloqueado", "FechaCierre", "ResultadoCuadratura", "ResumenCuadratura"]
-    },
-    update: {
-      allowed: [
-        "IdCentroCosto",
-        "IdCuentaMayor",
-        "IdTemporada",
-        "FolioNumero",
-        "PeriodoDesde",
-        "PeriodoHasta",
-        "Estado",
-        "Bloqueado",
-        "FechaCierre",
-        "ResultadoCuadratura",
-        "ResumenCuadratura"
-      ]
-    },
-    timestamps: {
-      created: "FechaCreacion",
-      updated: "FechaActualizacion"
-    }
-  },
   usuarios: {
     title: "Usuarios",
     table: "[cfl].[Usuario]",

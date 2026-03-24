@@ -118,8 +118,8 @@ function generateSapExcel(planilla) {
 
   // --- Filas de datos ---
   for (const doc of planilla.documentos || []) {
-    const referencia = doc.folio_numero || '';
-    const textoFolio = referencia ? `FLETES FOLIO ${referencia}` : '';
+    const referencia = doc.centro_costo_codigo || '';
+    const textoPrefactura = referencia ? `FLETES PREFACTURA ${referencia}` : '';
 
     for (const linea of doc.lineas || []) {
       const isDebit  = linea.clave_contabilizacion === '50';
@@ -150,7 +150,7 @@ function generateSapExcel(planilla) {
         /* 25 */ '',
         /* 26 */ '',
         /* 27 */ !isDebit ? (linea.nro_asignacion || '') : '',
-        /* 28 */ isDebit ? glosa : textoFolio,
+        /* 28 */ isDebit ? glosa : textoPrefactura,
         /* 29 */ indImpuesto,
         /* 30 */ '',
         /* 31 */ temporada,
