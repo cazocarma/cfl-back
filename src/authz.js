@@ -1,6 +1,7 @@
 const { getPool } = require("./db");
 
 const CACHE_TTL_MS = 30 * 1000;
+const MAX_CACHE_SIZE = 500;
 const cache = new Map();
 
 function normalizeText(value) {
@@ -27,6 +28,10 @@ function getCached(key) {
 }
 
 function setCached(key, value) {
+  if (cache.size >= MAX_CACHE_SIZE) {
+    const firstKey = cache.keys().next().value;
+    cache.delete(firstKey);
+  }
   cache.set(key, {
     value,
     expiresAt: Date.now() + CACHE_TTL_MS,

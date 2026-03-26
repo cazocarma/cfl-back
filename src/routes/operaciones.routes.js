@@ -35,20 +35,42 @@ function uniqueBy(rows, keyName) {
   return output;
 }
 
+const OPERACIONES_READ_PERMISSIONS = [
+  "operaciones.ver",
+  "facturas.ver",
+  "facturas.editar",
+  "facturas.conciliar",
+  "planillas.ver",
+  "planillas.generar",
+];
+
+function isAdmin(authzContext) {
+  return String(authzContext?.primaryRole || "").toLowerCase() === "administrador";
+}
+
+function ensureCanReadOperaciones(authzContext, res) {
+  if (isAdmin(authzContext) || hasAnyPermission(authzContext, OPERACIONES_READ_PERMISSIONS)) {
+    return true;
+  }
+  res.status(403).json({ error: "No tienes permisos para consultar operaciones" });
+  return false;
+}
+
 function buildPermissions(authzContext) {
   return {
     can_edit_facturas:
       hasAnyPermission(authzContext, ["facturas.editar", "facturas.conciliar"]) ||
-      String(authzContext?.primaryRole || "").toLowerCase() === "administrador",
+      isAdmin(authzContext),
     can_generate_planillas:
       hasAnyPermission(authzContext, ["planillas.generar"]) ||
-      String(authzContext?.primaryRole || "").toLowerCase() === "administrador",
+      isAdmin(authzContext),
   };
 }
 
 router.get("/facturas/overview", async (req, res, next) => {
   try {
     const authzContext = await resolveAuthzContext(req);
+    if (!ensureCanReadOperaciones(authzContext, res)) return;
     const pool = await getPool();
 
     const summaryResult = await pool.request().query(`
@@ -109,6 +131,7 @@ router.get("/facturas/overview", async (req, res, next) => {
 router.get("/planillas-sap/overview", async (req, res, next) => {
   try {
     const authzContext = await resolveAuthzContext(req);
+    if (!ensureCanReadOperaciones(authzContext, res)) return;
     const pool = await getPool();
 
     // Facturas recibidas sin planilla generada
@@ -207,6 +230,8 @@ router.get("/planillas-sap/overview", async (req, res, next) => {
 
 router.get("/estadisticas/overview", async (req, res, next) => {
   try {
+    const authzContext = await resolveAuthzContext(req);
+    if (!ensureCanReadOperaciones(authzContext, res)) return;
     const pool = await getPool();
 
     // KPIs globales
@@ -361,6 +386,8 @@ router.get("/auditoria/overview", async (req, res, next) => {
   const limit = clamp(parsePositiveInt(req.query.limit, 80), 10, 200);
 
   try {
+    const authzContext = await resolveAuthzContext(req);
+    if (!ensureCanReadOperaciones(authzContext, res)) return;
     const pool = await getPool();
 
     const summaryResult = await pool.request().query(`

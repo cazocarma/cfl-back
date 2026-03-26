@@ -2,6 +2,7 @@ const express = require("express");
 const helmet = require("helmet");
 const cors = require("cors");
 const { config } = require("./config");
+const { logger } = require("./logger");
 const { getPool, getActiveDatabase } = require("./db");
 const { dashboardRouter } = require("./routes/dashboard.routes");
 const { mantenedoresRouter } = require("./routes/mantenedores.routes");
@@ -25,7 +26,7 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
         imgSrc: ["'self'", "data:"],
@@ -41,7 +42,7 @@ app.use(
     origin: config.app.corsOrigin,
   })
 );
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 app.use((req, res, next) => {
   const originalJson = res.json.bind(res);
@@ -68,7 +69,7 @@ app.get("/health", async (_req, res) => {
       },
     });
   } catch (error) {
-    console.error("[health] Error de conexion a BD:", error.message);
+    logger.error({ err: error.message }, "health check BD connection error");
     res.status(503).json({
       healthy: false,
       db: {
@@ -104,12 +105,21 @@ app.use("/api/facturas", facturasRouter);
 app.use("/api/planillas-sap", planillasSapRouter);
 app.use("/api/authn", authnRouter);
 
-app.use((error, _req, res, _next) => {
+app.use((error, req, res, _next) => {
   const code =
     error && Number.isInteger(error.statusCode) ? error.statusCode : 500;
   const dbErrorCode = error && error.number ? error.number : null;
 
-  console.error(`[error-handler] ${code}`, error.message || error);
+  logger.error(
+    {
+      err: error.stack || error.message || error,
+      code,
+      method: req.method,
+      path: req.originalUrl,
+      userId: req.jwtPayload?.id_usuario || null,
+    },
+    "unhandled route error",
+  );
 
   if (dbErrorCode === 2627 || dbErrorCode === 2601) {
     res.status(409).json({

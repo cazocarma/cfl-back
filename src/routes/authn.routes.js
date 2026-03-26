@@ -7,6 +7,7 @@ const { config } = require("../config");
 const { resolveAuthzContext } = require("../authz");
 const { revokeToken } = require("../token-blocklist");
 const { loginLimiter } = require("../middleware/rate-limit.middleware");
+const { logger } = require("../logger");
 const { validate } = require("../middleware/validate.middleware");
 const { loginBody } = require("../schemas/authn.schemas");
 
@@ -61,11 +62,13 @@ authnRouter.post(
       const invalidCredentialsMessage = "Credenciales incorrectas";
 
       if (!user) {
+        logger.warn({ email, ip: req.ip }, "login_failed: usuario no encontrado");
         return res.status(401).json({ error: invalidCredentialsMessage });
       }
 
       const passwordIsValid = await bcrypt.compare(password, user.PasswordHash);
       if (!passwordIsValid) {
+        logger.warn({ email, ip: req.ip, userId: user.IdUsuario }, "login_failed: password incorrecta");
         return res.status(401).json({ error: invalidCredentialsMessage });
       }
 

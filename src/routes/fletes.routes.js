@@ -17,8 +17,106 @@ const {
 } = require("../helpers");
 const { validate } = require("../middleware/validate.middleware");
 const { fleteManualBody, fleteIdParam } = require("../schemas/fletes.schemas");
+const { logger } = require("../logger");
 
 const router = express.Router();
+
+function parseFleteInput(cabeceraIn) {
+  return {
+    idTipoFlete: parseRequiredBigInt(cabeceraIn.id_tipo_flete),
+    idCentroCostoInput: parseOptionalBigInt(cabeceraIn.id_centro_costo),
+    idCuentaMayorInput: parseOptionalBigInt(cabeceraIn.id_cuenta_mayor),
+    idImputacionFleteInput: parseOptionalBigInt(cabeceraIn.id_imputacion_flete),
+    tipoMovimiento: normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH"),
+    requestedStatus: normalizeLifecycleStatus(cabeceraIn.estado),
+    fechaSalida: toNullableTrimmedString(cabeceraIn.fecha_salida),
+    horaSalida: toNullableTrimmedString(cabeceraIn.hora_salida),
+    montoAplicado: Number.isFinite(Number(cabeceraIn.monto_aplicado)) ? Number(cabeceraIn.monto_aplicado) : 0,
+    montoExtra: Number.isFinite(Number(cabeceraIn.monto_extra)) ? Number(cabeceraIn.monto_extra) : 0,
+    guiaRemision: toNullableTrimmedString(cabeceraIn.guia_remision),
+    numeroEntrega: toNullableTrimmedString(cabeceraIn.numero_entrega),
+    idDetalleViaje: parseOptionalBigInt(cabeceraIn.id_detalle_viaje),
+    idProductor: parseOptionalBigInt(cabeceraIn.id_productor),
+    idTarifa: parseOptionalBigInt(cabeceraIn.id_tarifa),
+    sentidoFlete: toNullableTrimmedString(cabeceraIn.sentido_flete),
+  };
+}
+
+function validateFleteInput(parsed, res) {
+  if (!parsed.idTipoFlete) {
+    res.status(400).json({ error: "Falta id_tipo_flete" });
+    return false;
+  }
+  if (!parsed.idCentroCostoInput && !parsed.idImputacionFleteInput) {
+    res.status(400).json({ error: "Falta id_centro_costo" });
+    return false;
+  }
+  if (!parsed.tipoMovimiento) {
+    res.status(400).json({ error: "tipo_movimiento invalido (Despacho/Retorno)" });
+    return false;
+  }
+  if (!parsed.fechaSalida) {
+    res.status(400).json({ error: "Falta fecha_salida (YYYY-MM-DD)" });
+    return false;
+  }
+  if (!parsed.horaSalida) {
+    res.status(400).json({ error: "Falta hora_salida (HH:MM[:SS])" });
+    return false;
+  }
+  return true;
+}
+
+async function insertFleteDetalles(transaction, idCabeceraFlete, detallesIn, now) {
+  for (const detalle of detallesIn) {
+    const material = toNullableTrimmedString(detalle.material);
+    const descripcion = toNullableTrimmedString(detalle.descripcion);
+    const unidad = toNullableTrimmedString(detalle.unidad);
+    const cantidad = detalle.cantidad === null || detalle.cantidad === undefined || detalle.cantidad === "" ? null : Number(detalle.cantidad);
+    const peso = detalle.peso === null || detalle.peso === undefined || detalle.peso === "" ? null : Number(detalle.peso);
+    const idEspecie = parseOptionalBigInt(detalle.id_especie);
+
+    await new sql.Request(transaction)
+      .input("idCabeceraFlete", sql.BigInt, idCabeceraFlete)
+      .input("idEspecie", sql.BigInt, idEspecie)
+      .input("material", sql.VarChar(50), material)
+      .input("descripcion", sql.VarChar(100), descripcion)
+      .input("cantidad", sql.Decimal(12, 2), Number.isFinite(cantidad) ? cantidad : null)
+      .input("unidad", sql.Char(3), unidad ? unidad.slice(0, 3) : null)
+      .input("peso", sql.Decimal(15, 3), Number.isFinite(peso) ? peso : null)
+      .input("createdAt", sql.DateTime2(0), now)
+      .query(`
+        INSERT INTO [cfl].[DetalleFlete] (
+          [IdCabeceraFlete],
+          [IdEspecie],
+          [Material],
+          [Descripcion],
+          [Cantidad],
+          [Unidad],
+          [Peso],
+          [FechaCreacion]
+        )
+        VALUES (
+          @idCabeceraFlete,
+          @idEspecie,
+          @material,
+          @descripcion,
+          @cantidad,
+          @unidad,
+          @peso,
+          @createdAt
+        );
+      `);
+  }
+}
+
+async function safeRollback(transaction) {
+  if (!transaction) return;
+  try {
+    await transaction.rollback();
+  } catch (rollbackError) {
+    logger.error({ err: rollbackError.message }, "transaction rollback failed");
+  }
+}
 
 async function fetchCabecera(pool, idCabecera) {
   const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
@@ -199,49 +297,9 @@ router.get("/:id_cabecera_flete", validate({ params: fleteIdParam }), async (req
 });
 
 router.post("/manual", validate({ body: fleteManualBody }), async (req, res, next) => {
-  const body = req.body;
-  const cabeceraIn = body.cabecera;
-  const detallesIn = body.detalles;
-
-  const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
-  const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
-  const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
-  const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
-  const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
-  const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
-  const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
-  const montoAplicadoRaw = cabeceraIn.monto_aplicado;
-  const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
-  const montoExtraRaw = cabeceraIn.monto_extra;
-  const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
-  const guiaRemision = toNullableTrimmedString(cabeceraIn.guia_remision);
-  const numeroEntrega = toNullableTrimmedString(cabeceraIn.numero_entrega);
-  const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
-  const idProductor = parseOptionalBigInt(cabeceraIn.id_productor);
-  const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
-  const sentidoFlete = toNullableTrimmedString(cabeceraIn.sentido_flete);
-
-  if (!idTipoFlete) {
-    res.status(400).json({ error: "Falta id_tipo_flete" });
-    return;
-  }
-  if (!idCentroCostoInput && !idImputacionFleteInput) {
-    res.status(400).json({ error: "Falta id_centro_costo" });
-    return;
-  }
-  if (!tipoMovimiento) {
-    res.status(400).json({ error: "tipo_movimiento invalido (Despacho/Retorno)" });
-    return;
-  }
-  if (!fechaSalida) {
-    res.status(400).json({ error: "Falta fecha_salida (YYYY-MM-DD)" });
-    return;
-  }
-  if (!horaSalida) {
-    res.status(400).json({ error: "Falta hora_salida (HH:MM[:SS])" });
-    return;
-  }
+  const { cabecera: cabeceraIn, detalles: detallesIn } = req.body;
+  const parsed = parseFleteInput(cabeceraIn);
+  if (!validateFleteInput(parsed, res)) return;
 
   let transaction;
 
@@ -252,14 +310,12 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
 
     const now = new Date();
     const imputacion = await resolveImputacionFlete(transaction, {
-      idTipoFlete,
-      idCentroCosto: idCentroCostoInput,
-      idCuentaMayor: idCuentaMayorInput,
-      idImputacionFlete: idImputacionFleteInput,
+      idTipoFlete: parsed.idTipoFlete,
+      idCentroCosto: parsed.idCentroCostoInput,
+      idCuentaMayor: parsed.idCuentaMayorInput,
+      idImputacionFlete: parsed.idImputacionFleteInput,
     });
-    const idCentroCosto = imputacion.idCentroCosto;
-    const idCuentaMayor = imputacion.idCuentaMayor;
-    const idImputacionFlete = imputacion.idImputacionFlete;
+    const { idCentroCosto, idCuentaMayor, idImputacionFlete } = imputacion;
 
     if (!idCentroCosto) {
       await transaction.rollback();
@@ -269,38 +325,38 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
     const estado = deriveLifecycleStatus({
-      requestedStatus,
-      idTipoFlete,
+      requestedStatus: parsed.requestedStatus,
+      idTipoFlete: parsed.idTipoFlete,
       idCentroCosto,
-      idDetalleViaje,
+      idDetalleViaje: parsed.idDetalleViaje,
       idMovil,
-      idTarifa,
+      idTarifa: parsed.idTarifa,
       hasDetalles: detallesIn.length > 0,
     });
 
     const insertCabeceraReq = new sql.Request(transaction);
-    insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
+    insertCabeceraReq.input("idDetalleViaje", sql.BigInt, parsed.idDetalleViaje);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.sap_numero_entrega));
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete));
     insertCabeceraReq.input("sapCentroCosto", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_centro_costo));
     insertCabeceraReq.input("sapCuentaMayor", sql.Char(10), toNullableTrimmedString(cabeceraIn.sap_cuenta_mayor));
     insertCabeceraReq.input("idCuentaMayor", sql.BigInt, idCuentaMayor);
     insertCabeceraReq.input("idImputacionFlete", sql.BigInt, idImputacionFlete);
-    insertCabeceraReq.input("idProductor", sql.BigInt, idProductor);
-    insertCabeceraReq.input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null);
-    insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null);
-    insertCabeceraReq.input("tipoMovimiento", sql.VarChar(4), tipoMovimiento);
-    insertCabeceraReq.input("sentidoFlete", sql.VarChar(20), sentidoFlete ? sentidoFlete.slice(0, 20) : null);
+    insertCabeceraReq.input("idProductor", sql.BigInt, parsed.idProductor);
+    insertCabeceraReq.input("guiaRemision", sql.Char(25), parsed.guiaRemision ? parsed.guiaRemision.slice(0, 25) : null);
+    insertCabeceraReq.input("numeroEntrega", sql.VarChar(20), parsed.numeroEntrega ? parsed.numeroEntrega.slice(0, 20) : null);
+    insertCabeceraReq.input("tipoMovimiento", sql.VarChar(4), parsed.tipoMovimiento);
+    insertCabeceraReq.input("sentidoFlete", sql.VarChar(20), parsed.sentidoFlete ? parsed.sentidoFlete.slice(0, 20) : null);
     insertCabeceraReq.input("estado", sql.VarChar(20), estado);
-    insertCabeceraReq.input("fechaSalida", sql.Date, fechaSalida);
-    insertCabeceraReq.input("horaSalida", sql.VarChar(8), horaSalida);
-    insertCabeceraReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicado);
-    insertCabeceraReq.input("montoExtra", sql.Decimal(18, 2), montoExtra);
+    insertCabeceraReq.input("fechaSalida", sql.Date, parsed.fechaSalida);
+    insertCabeceraReq.input("horaSalida", sql.VarChar(8), parsed.horaSalida);
+    insertCabeceraReq.input("montoAplicado", sql.Decimal(18, 2), parsed.montoAplicado);
+    insertCabeceraReq.input("montoExtra", sql.Decimal(18, 2), parsed.montoExtra);
     insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
-    insertCabeceraReq.input("idTarifa", sql.BigInt, idTarifa);
+    insertCabeceraReq.input("idTarifa", sql.BigInt, parsed.idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
     insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_usuario_creador));
-    insertCabeceraReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
+    insertCabeceraReq.input("idTipoFlete", sql.BigInt, parsed.idTipoFlete);
     insertCabeceraReq.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("updatedAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("idCentroCosto", sql.BigInt, idCentroCosto);
@@ -365,46 +421,7 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
 
     const idCabeceraFlete = cabeceraResult.recordset[0].IdCabeceraFlete;
 
-    for (const detalle of detallesIn) {
-      const material = toNullableTrimmedString(detalle.material);
-      const descripcion = toNullableTrimmedString(detalle.descripcion);
-      const unidad = toNullableTrimmedString(detalle.unidad);
-      const cantidad = detalle.cantidad === null || detalle.cantidad === undefined || detalle.cantidad === "" ? null : Number(detalle.cantidad);
-      const peso = detalle.peso === null || detalle.peso === undefined || detalle.peso === "" ? null : Number(detalle.peso);
-      const idEspecie = parseOptionalBigInt(detalle.id_especie);
-
-      await new sql.Request(transaction)
-        .input("idCabeceraFlete", sql.BigInt, idCabeceraFlete)
-        .input("idEspecie", sql.BigInt, idEspecie)
-        .input("material", sql.VarChar(50), material)
-        .input("descripcion", sql.VarChar(100), descripcion)
-        .input("cantidad", sql.Decimal(12, 2), Number.isFinite(cantidad) ? cantidad : null)
-        .input("unidad", sql.Char(3), unidad ? unidad.slice(0, 3) : null)
-        .input("peso", sql.Decimal(15, 3), Number.isFinite(peso) ? peso : null)
-        .input("createdAt", sql.DateTime2(0), now)
-        .query(`
-          INSERT INTO [cfl].[DetalleFlete] (
-            [IdCabeceraFlete],
-            [IdEspecie],
-            [Material],
-            [Descripcion],
-            [Cantidad],
-            [Unidad],
-            [Peso],
-            [FechaCreacion]
-          )
-          VALUES (
-            @idCabeceraFlete,
-            @idEspecie,
-            @material,
-            @descripcion,
-            @cantidad,
-            @unidad,
-            @peso,
-            @createdAt
-          );
-        `);
-    }
+    await insertFleteDetalles(transaction, idCabeceraFlete, detallesIn, now);
 
     await transaction.commit();
 
@@ -415,63 +432,16 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
       },
     });
   } catch (error) {
-    if (transaction) {
-      try {
-        await transaction.rollback();
-      } catch (_rollbackError) {
-        // no-op
-      }
-    }
+    await safeRollback(transaction);
     next(error);
   }
 });
 
 router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteManualBody }), async (req, res, next) => {
   const idCabecera = req.params.id_cabecera_flete;
-
-  const body = req.body;
-  const cabeceraIn = body.cabecera;
-  const detallesIn = body.detalles;
-
-  const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
-  const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
-  const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
-  const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
-  const tipoMovimiento = normalizeTipoMovimiento(cabeceraIn.tipo_movimiento || "PUSH");
-  const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
-  const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
-  const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
-  const montoAplicadoRaw = cabeceraIn.monto_aplicado;
-  const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
-  const montoExtraRaw = cabeceraIn.monto_extra;
-  const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
-  const idDetalleViajeIn = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
-  const idProductorIn = parseOptionalBigInt(cabeceraIn.id_productor);
-  const idTarifaIn = parseOptionalBigInt(cabeceraIn.id_tarifa);
-  const guiaRemisionIn = toNullableTrimmedString(cabeceraIn.guia_remision);
-  const numeroEntregaIn = toNullableTrimmedString(cabeceraIn.numero_entrega);
-  const sentidoFleteIn = toNullableTrimmedString(cabeceraIn.sentido_flete);
-
-  if (!idTipoFlete) {
-    res.status(400).json({ error: "Falta id_tipo_flete" });
-    return;
-  }
-  if (!idCentroCostoInput && !idImputacionFleteInput) {
-    res.status(400).json({ error: "Falta id_centro_costo" });
-    return;
-  }
-  if (!tipoMovimiento) {
-    res.status(400).json({ error: "tipo_movimiento invalido (Despacho/Retorno)" });
-    return;
-  }
-  if (!fechaSalida) {
-    res.status(400).json({ error: "Falta fecha_salida (YYYY-MM-DD)" });
-    return;
-  }
-  if (!horaSalida) {
-    res.status(400).json({ error: "Falta hora_salida (HH:MM[:SS])" });
-    return;
-  }
+  const { cabecera: cabeceraIn, detalles: detallesIn } = req.body;
+  const parsed = parseFleteInput(cabeceraIn);
+  if (!validateFleteInput(parsed, res)) return;
 
   let transaction;
 
@@ -502,18 +472,16 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
       return;
     }
 
-    const idDetalleViaje = idDetalleViajeIn ?? existing.IdDetalleViaje ?? null;
-    const idProductor = idProductorIn ?? existing.IdProductor ?? null;
-    const idTarifa = idTarifaIn ?? existing.IdTarifa ?? null;
+    const idDetalleViaje = parsed.idDetalleViaje ?? existing.IdDetalleViaje ?? null;
+    const idProductor = parsed.idProductor ?? existing.IdProductor ?? null;
+    const idTarifa = parsed.idTarifa ?? existing.IdTarifa ?? null;
     const imputacion = await resolveImputacionFlete(transaction, {
-      idTipoFlete,
-      idCentroCosto: idCentroCostoInput ?? existing.IdCentroCosto ?? null,
-      idCuentaMayor: idCuentaMayorInput ?? existing.IdCuentaMayor ?? null,
-      idImputacionFlete: idImputacionFleteInput ?? existing.IdImputacionFlete ?? null,
+      idTipoFlete: parsed.idTipoFlete,
+      idCentroCosto: parsed.idCentroCostoInput ?? existing.IdCentroCosto ?? null,
+      idCuentaMayor: parsed.idCuentaMayorInput ?? existing.IdCuentaMayor ?? null,
+      idImputacionFlete: parsed.idImputacionFleteInput ?? existing.IdImputacionFlete ?? null,
     });
-    const idCentroCosto = imputacion.idCentroCosto;
-    const idCuentaMayor = imputacion.idCuentaMayor;
-    const idImputacionFlete = imputacion.idImputacionFlete;
+    const { idCentroCosto, idCuentaMayor, idImputacionFlete } = imputacion;
 
     if (!idCentroCosto) {
       await transaction.rollback();
@@ -522,12 +490,12 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
     }
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now, existing.IdMovil ?? null);
-    const guiaRemision  = guiaRemisionIn  ?? (existing.GuiaRemision  ? String(existing.GuiaRemision)  : null);
-    const numeroEntrega = numeroEntregaIn ?? (existing.NumeroEntrega ? String(existing.NumeroEntrega) : null);
-    const sentidoFlete = sentidoFleteIn ?? (existing.SentidoFlete ? String(existing.SentidoFlete) : null);
+    const guiaRemision  = parsed.guiaRemision  ?? (existing.GuiaRemision  ? String(existing.GuiaRemision)  : null);
+    const numeroEntrega = parsed.numeroEntrega ?? (existing.NumeroEntrega ? String(existing.NumeroEntrega) : null);
+    const sentidoFlete = parsed.sentidoFlete ?? (existing.SentidoFlete ? String(existing.SentidoFlete) : null);
     const estado = deriveLifecycleStatus({
-      requestedStatus,
-      idTipoFlete,
+      requestedStatus: parsed.requestedStatus,
+      idTipoFlete: parsed.idTipoFlete,
       idCentroCosto,
       idDetalleViaje,
       idMovil,
@@ -537,19 +505,19 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
 
     await new sql.Request(transaction)
       .input("idCabecera", sql.BigInt, idCabecera)
-      .input("tipoMovimiento", sql.VarChar(4), tipoMovimiento)
+      .input("tipoMovimiento", sql.VarChar(4), parsed.tipoMovimiento)
       .input("estado", sql.VarChar(20), estado)
-      .input("fechaSalida", sql.Date, fechaSalida)
-      .input("horaSalida", sql.VarChar(8), horaSalida)
-      .input("montoAplicado", sql.Decimal(18, 2), montoAplicado)
-      .input("montoExtra", sql.Decimal(18, 2), montoExtra)
+      .input("fechaSalida", sql.Date, parsed.fechaSalida)
+      .input("horaSalida", sql.VarChar(8), parsed.horaSalida)
+      .input("montoAplicado", sql.Decimal(18, 2), parsed.montoAplicado)
+      .input("montoExtra", sql.Decimal(18, 2), parsed.montoExtra)
       .input("guiaRemision", sql.Char(25), guiaRemision ? guiaRemision.slice(0, 25) : null)
       .input("numeroEntrega", sql.VarChar(20), numeroEntrega ? numeroEntrega.slice(0, 20) : null)
       .input("idDetalleViaje", sql.BigInt, idDetalleViaje)
       .input("idMovil", sql.BigInt, idMovil)
       .input("idTarifa", sql.BigInt, idTarifa)
       .input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones))
-      .input("idTipoFlete", sql.BigInt, idTipoFlete)
+      .input("idTipoFlete", sql.BigInt, parsed.idTipoFlete)
       .input("idCuentaMayor", sql.BigInt, idCuentaMayor)
       .input("idImputacionFlete", sql.BigInt, idImputacionFlete)
       .input("idProductor", sql.BigInt, idProductor)
@@ -588,46 +556,7 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
         WHERE IdCabeceraFlete = @idCabecera;
       `);
 
-    for (const detalle of detallesIn) {
-      const material = toNullableTrimmedString(detalle.material);
-      const descripcion = toNullableTrimmedString(detalle.descripcion);
-      const unidad = toNullableTrimmedString(detalle.unidad);
-      const cantidad = detalle.cantidad === null || detalle.cantidad === undefined || detalle.cantidad === "" ? null : Number(detalle.cantidad);
-      const peso = detalle.peso === null || detalle.peso === undefined || detalle.peso === "" ? null : Number(detalle.peso);
-      const idEspecie = parseOptionalBigInt(detalle.id_especie);
-
-      await new sql.Request(transaction)
-        .input("idCabeceraFlete", sql.BigInt, idCabecera)
-        .input("idEspecie", sql.BigInt, idEspecie)
-        .input("material", sql.VarChar(50), material)
-        .input("descripcion", sql.VarChar(100), descripcion)
-        .input("cantidad", sql.Decimal(12, 2), Number.isFinite(cantidad) ? cantidad : null)
-        .input("unidad", sql.Char(3), unidad ? unidad.slice(0, 3) : null)
-        .input("peso", sql.Decimal(15, 3), Number.isFinite(peso) ? peso : null)
-        .input("createdAt", sql.DateTime2(0), now)
-        .query(`
-          INSERT INTO [cfl].[DetalleFlete] (
-            [IdCabeceraFlete],
-            [IdEspecie],
-            [Material],
-            [Descripcion],
-            [Cantidad],
-            [Unidad],
-            [Peso],
-            [FechaCreacion]
-          )
-          VALUES (
-            @idCabeceraFlete,
-            @idEspecie,
-            @material,
-            @descripcion,
-            @cantidad,
-            @unidad,
-            @peso,
-            @createdAt
-          );
-        `);
-    }
+    await insertFleteDetalles(transaction, idCabecera, detallesIn, now);
 
     await transaction.commit();
 
@@ -639,13 +568,7 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
       data: { cabecera: updatedCabecera, detalles: updatedDetalles },
     });
   } catch (error) {
-    if (transaction) {
-      try {
-        await transaction.rollback();
-      } catch (_rollbackError) {
-        // no-op
-      }
-    }
+    await safeRollback(transaction);
     next(error);
   }
 });

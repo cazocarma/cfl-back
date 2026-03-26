@@ -640,12 +640,17 @@ router.post("/usuarios", validate({ body: crearUsuarioBody }), async (req, res, 
     const { username, email, password, nombre, apellido, activo, id_rol } = req.body || {};
 
     if (!username || !email || !password) {
-      res.status(400).json({ error: "Faltan campos requeridos", missing_fields: ["username", "email", "password"].filter(f => !req.body?.[f]) });
+      res.status(400).json({ error: "Faltan campos requeridos" });
       return;
     }
 
     if (password.length < 8) {
       res.status(400).json({ error: "La contraseña debe tener al menos 8 caracteres" });
+      return;
+    }
+
+    if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+      res.status(400).json({ error: "La contraseña debe contener al menos una mayúscula, una minúscula y un dígito" });
       return;
     }
 
@@ -892,8 +897,9 @@ router.get("/:entity", async (req, res, next) => {
       }
       // "todos" → sin filtro
     }
+    const maxRows = 5000; // limite de seguridad para evitar DoS
     const sql = `
-      SELECT ${entityConfig.listColumns.join(", ")}
+      SELECT TOP ${maxRows} ${entityConfig.listColumns.join(", ")}
       FROM ${buildBaseFrom(entityConfig)}
       ${activeFilter}
       ORDER BY ${entityConfig.orderBy};

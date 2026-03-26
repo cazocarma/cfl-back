@@ -1,4 +1,5 @@
 const { recordAuditForRequest, shouldAuditRequest } = require("../audit");
+const { logger } = require("../logger");
 
 function auditMiddleware(req, res, next) {
   if (!shouldAuditRequest(req)) {
@@ -22,7 +23,9 @@ function auditMiddleware(req, res, next) {
   };
 
   res.once("finish", () => {
-    recordAuditForRequest(req, res.statusCode, responseBody).catch(() => {});
+    recordAuditForRequest(req, res.statusCode, responseBody).catch(
+      (err) => logger.error({ err: err.message }, "audit record failed")
+    );
   });
 
   return next();

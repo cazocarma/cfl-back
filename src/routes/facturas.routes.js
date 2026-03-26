@@ -136,6 +136,7 @@ async function fetchFactura(pool, idFactura) {
         fac.estado,
         fac.CriterioAgrupacion,
         fac.Observaciones,
+        fac.NumeroFacturaRecibida,
         fac.FechaCreacion,
         fac.FechaActualizacion
       FROM [cfl].[CabeceraFactura] fac
@@ -568,6 +569,7 @@ router.get('/', async (req, res, next) => {
         fac.estado,
         fac.CriterioAgrupacion,
         fac.Observaciones,
+        fac.NumeroFacturaRecibida,
         fac.FechaCreacion,
         fac.FechaActualizacion,
         cantidad_movimientos = (
@@ -783,60 +785,6 @@ router.put('/:id', validate({ params: idParam, body: actualizarFacturaBody }), a
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /facturas/:id — eliminar factura en Borrador definitivamente
-// Devuelve todos los fletes a COMPLETADO
-// ---------------------------------------------------------------------------
-router.delete('/:id', async (req, res, next) => {
-  const idFactura = parsePositiveInt(req.params.id, 0);
-  if (!idFactura) { res.status(400).json({ error: 'id_factura inválido' }); return; }
-
-  const { allowed } = await checkFacturacionPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
-
-  let transaction;
-  try {
-    const pool = await getPool();
-    const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
-    if (factura.estado !== 'borrador') {
-      res.status(409).json({ error: 'Solo se pueden eliminar pre facturas en estado Borrador' });
-      return;
-    }
-
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
-    const now = new Date();
-
-    // Devolver fletes a COMPLETADO with IdFactura=NULL
-    const fleteIds = factura.movimientos.map(m => m.id_cabecera_flete);
-    if (fleteIds.length) {
-      const revertReq = new sql.Request(transaction);
-      revertReq.input('updatedAt', sql.DateTime2(0), now);
-      const inFragment = buildInClause(revertReq, fleteIds, 'df');
-
-      await revertReq.query(`
-        UPDATE [cfl].[CabeceraFlete]
-        SET IdFactura = NULL,
-            estado = 'COMPLETADO',
-            FechaActualizacion = @updatedAt
-        WHERE IdCabeceraFlete IN (${inFragment});
-      `);
-    }
-
-    // Eliminar cabecera
-    await new sql.Request(transaction)
-      .input('idFactura', sql.BigInt, idFactura)
-      .query(`DELETE FROM [cfl].[CabeceraFactura] WHERE IdFactura = @idFactura;`);
-
-    await transaction.commit();
-    res.json({ message: 'Pre factura eliminada exitosamente' });
-  } catch (err) {
-    if (transaction) { try { await transaction.rollback(); } catch (_) {} }
-    next(err);
-  }
-});
-
-// ---------------------------------------------------------------------------
 // PATCH /facturas/:id/estado — transición de estado
 // Body: { estado: 'anulada' | 'recibida' }
 // ---------------------------------------------------------------------------
@@ -850,6 +798,14 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
   const nuevoEstado = String(req.body?.estado || '').toLowerCase();
   if (!['anulada', 'recibida'].includes(nuevoEstado)) {
     res.status(400).json({ error: 'estado debe ser "anulada" o "recibida"' });
+    return;
+  }
+
+  const numeroFacturaRecibida = req.body?.numero_factura_recibida || null;
+
+  // Si se marca como recibida, el número de factura recibida es obligatorio
+  if (nuevoEstado === 'recibida' && !numeroFacturaRecibida) {
+    res.status(400).json({ error: 'numero_factura_recibida es obligatorio al marcar como recibida' });
     return;
   }
 
@@ -876,15 +832,27 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
     await transaction.begin();
     const now = new Date();
 
-    await new sql.Request(transaction)
+    const updateReq = new sql.Request(transaction)
       .input('idFactura',  sql.BigInt,    idFactura)
       .input('estado',     sql.VarChar(20), nuevoEstado)
-      .input('updatedAt',  sql.DateTime2(0), now)
-      .query(`
+      .input('updatedAt',  sql.DateTime2(0), now);
+
+    if (nuevoEstado === 'recibida') {
+      updateReq.input('numFacRecibida', sql.NVarChar(60), numeroFacturaRecibida);
+      await updateReq.query(`
+        UPDATE [cfl].[CabeceraFactura]
+        SET estado = @estado,
+            NumeroFacturaRecibida = @numFacRecibida,
+            FechaActualizacion = @updatedAt
+        WHERE IdFactura = @idFactura;
+      `);
+    } else {
+      await updateReq.query(`
         UPDATE [cfl].[CabeceraFactura]
         SET estado = @estado, FechaActualizacion = @updatedAt
         WHERE IdFactura = @idFactura;
       `);
+    }
 
     const fleteIds = factura.movimientos.map(m => m.id_cabecera_flete);
 

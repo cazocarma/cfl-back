@@ -598,6 +598,23 @@ router.get("/fletes/completados", async (req, res, next) => {
   const fechaDesdeRaw = toNullableTrimmedString(req.query.fecha_desde);
   const fechaHastaRaw = toNullableTrimmedString(req.query.fecha_hasta);
 
+  // Ordenamiento seguro: whitelist de columnas permitidas
+  const SORT_COLUMNS = {
+    id: "IdCabeceraFlete",
+    fecha: "FechaSalida",
+    monto: "MontoAplicado",
+    estado: "estado_lifecycle",
+    tipo_flete: "tipo_flete_nombre",
+    actualizado: "FechaActualizacion",
+  };
+  const sortByRaw = toNullableTrimmedString(req.query.sort_by);
+  const sortDirRaw = toNullableTrimmedString(req.query.sort_dir);
+  const sortColumn = SORT_COLUMNS[sortByRaw] || "IdCabeceraFlete";
+  const sortDir = sortDirRaw === "asc" ? "ASC" : "DESC";
+  const orderClause = sortColumn === "IdCabeceraFlete"
+    ? `IdCabeceraFlete ${sortDir}`
+    : `${sortColumn} ${sortDir}, IdCabeceraFlete DESC`;
+
   try {
     const pool = await getPool();
     const request = pool.request();
@@ -791,7 +808,7 @@ router.get("/fletes/completados", async (req, res, next) => {
         )
         AND (@fechaDesde IS NULL OR FechaSalida >= CAST(@fechaDesde AS DATE))
         AND (@fechaHasta IS NULL OR FechaSalida <= CAST(@fechaHasta AS DATE))
-      ORDER BY FechaActualizacion DESC, IdCabeceraFlete DESC
+      ORDER BY ${orderClause}
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
     `;
 

@@ -22,6 +22,7 @@ const actualizarFacturaBody = z.object({
 
 const cambiarEstadoBody = z.object({
   estado: z.enum(["anulada", "recibida"]),
+  numero_factura_recibida: z.string().max(60).optional().nullable(),
 });
 
 const idParam = z.object({

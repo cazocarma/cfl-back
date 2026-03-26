@@ -150,13 +150,15 @@ async function updateFletesEstado(requestOrTransaction, fleteIds, fromEstado, to
     : requestOrTransaction
 
   req.input('updatedAt', sql.DateTime2(0), now)
+  req.input('toEstado', sql.VarChar(20), toEstado)
+  req.input('fromEstado', sql.VarChar(20), fromEstado)
   const inFragment = buildInClause(req, fleteIds, 'uf')
 
   return req.query(`
     UPDATE [cfl].[CabeceraFlete]
-    SET estado = '${toEstado}', FechaActualizacion = @updatedAt
+    SET estado = @toEstado, FechaActualizacion = @updatedAt
     WHERE IdCabeceraFlete IN (${inFragment})
-      AND UPPER(estado) = '${fromEstado}';
+      AND UPPER(estado) = UPPER(@fromEstado);
   `)
 }
 

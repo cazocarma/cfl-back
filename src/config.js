@@ -1,8 +1,10 @@
 const fs = require("fs");
 const path = require("path");
+const { logger } = require("./logger");
 
 const DEFAULT_DB_PORT = 1433;
 const MIN_JWT_SECRET_BYTES = 32;
+const MIN_SAP_TOKEN_BYTES = 16;
 
 function parseEnvValue(raw) {
   const value = raw.trim();
@@ -83,7 +85,7 @@ const config = {
       process.env.SAP_ADAPTER_BASE_URL || process.env.SAP_ADAPTER_API_URL,
       ""
     ),
-    token: process.env.SAP_ADAPTER_API_TOKEN || process.env.SAP_ADAPTER_TOKEN || "",
+    token: validateSapToken(),
     defaultDestination: (process.env.SAP_ADAPTER_DEFAULT_DESTINATION || "PRD").trim().toUpperCase(),
     requestTimeoutMs: toNumber(process.env.SAP_ADAPTER_REQUEST_TIMEOUT_MS, 125000),
   },
@@ -96,17 +98,17 @@ function requireJwtSecret() {
   const secret = process.env.AUTHN_JWT_SECRET;
 
   if (!secret) {
-    console.error(
-      "[SEGURIDAD FATAL] La variable de entorno AUTHN_JWT_SECRET no esta definida.\n" +
-        "Genera un secreto seguro con:\n" +
-        `  node -e "console.log(require('crypto').randomBytes(${MIN_JWT_SECRET_BYTES}).toString('hex'))"`
+    logger.fatal(
+      "[SEGURIDAD FATAL] La variable de entorno AUTHN_JWT_SECRET no esta definida. " +
+        "Genera un secreto seguro con: " +
+        `node -e "console.log(require('crypto').randomBytes(${MIN_JWT_SECRET_BYTES}).toString('hex'))"`
     );
     process.exit(1);
   }
 
   const entropyBytes = Buffer.byteLength(secret, "utf8");
   if (entropyBytes < MIN_JWT_SECRET_BYTES) {
-    console.error(
+    logger.fatal(
       `[SEGURIDAD FATAL] AUTHN_JWT_SECRET es demasiado corto (${entropyBytes} bytes). ` +
         `Se requieren al menos ${MIN_JWT_SECRET_BYTES} bytes (${MIN_JWT_SECRET_BYTES * 2} caracteres hex).`
     );
@@ -114,6 +116,25 @@ function requireJwtSecret() {
   }
 
   return secret;
+}
+
+function validateSapToken() {
+  const token = process.env.SAP_ADAPTER_API_TOKEN || process.env.SAP_ADAPTER_TOKEN || "";
+
+  if (!token) {
+    logger.warn("SAP_ADAPTER_API_TOKEN no esta definido — integracion SAP deshabilitada");
+    return "";
+  }
+
+  const tokenBytes = Buffer.byteLength(token, "utf8");
+  if (tokenBytes < MIN_SAP_TOKEN_BYTES) {
+    logger.warn(
+      `SAP_ADAPTER_API_TOKEN es muy corto (${tokenBytes} bytes). ` +
+        `Se recomiendan al menos ${MIN_SAP_TOKEN_BYTES} bytes.`
+    );
+  }
+
+  return token;
 }
 
 module.exports = {

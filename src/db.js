@@ -1,5 +1,6 @@
 const sql = require("mssql");
 const { config } = require("./config");
+const { logger } = require("./logger");
 
 const FALLBACK_DATABASE = "master";
 
@@ -119,8 +120,7 @@ async function connectWithFallback() {
       return targetPool;
     }
 
-    // eslint-disable-next-line no-console
-    console.warn(
+    logger.warn(
       `database "${targetDb}" reachable but schema "cfl" not found; falling back to "${FALLBACK_DATABASE}"`
     );
     await targetPool.close();
@@ -129,8 +129,7 @@ async function connectWithFallback() {
       throw error;
     }
 
-    // eslint-disable-next-line no-console
-    console.warn(
+    logger.warn(
       `failed to connect to database "${targetDb}" (${error.message}); falling back to "${FALLBACK_DATABASE}"`
     );
   }

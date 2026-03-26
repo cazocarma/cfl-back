@@ -1,4 +1,5 @@
 const { getPool } = require("./db");
+const { logger } = require("./logger");
 
 const CACHE_TTL_MS = 60 * 1000;
 const cache = new Map();
@@ -68,15 +69,23 @@ async function isTokenRevoked(jti) {
 async function purgeExpired() {
   try {
     const pool = await getPool();
-    await pool.request().query(
-      "DELETE FROM [cfl].[TokenBlocklist] WHERE ExpiresAt < GETUTCDATE();"
+
+    // Primero obtener los JTIs expirados para limpiar solo esos del cache
+    const expired = await pool.request().query(
+      "SELECT Jti FROM [cfl].[TokenBlocklist] WHERE ExpiresAt < GETUTCDATE();"
     );
 
-    for (const [jti] of cache) {
-      cache.delete(jti);
+    if (expired.recordset.length > 0) {
+      await pool.request().query(
+        "DELETE FROM [cfl].[TokenBlocklist] WHERE ExpiresAt < GETUTCDATE();"
+      );
+
+      for (const row of expired.recordset) {
+        cache.delete(row.Jti);
+      }
     }
   } catch (error) {
-    console.error("[token-blocklist] Error purging expired tokens:", error.message);
+    logger.error({ err: error.message }, "token-blocklist purge failed");
   }
 }
 
