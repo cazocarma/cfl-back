@@ -405,6 +405,7 @@ function toUiJobStatus(status, summary) {
 }
 
 function toUiJobType(params) {
+  if (params?.job_type === JOB_TYPE.XBLNR) return "xblnr";
   return params?.job_type === JOB_TYPE.VBELN ? "vbeln" : "rango_fechas";
 }
 

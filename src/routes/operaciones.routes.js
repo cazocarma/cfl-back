@@ -155,8 +155,8 @@ router.get("/planillas-sap/overview", async (req, res, next) => {
         ON emp.IdEmpresa = fac.IdEmpresa
       WHERE LOWER(fac.estado) = 'recibida'
         AND NOT EXISTS (
-          SELECT 1 FROM [cfl].[PlanillaSap] ps
-          WHERE ps.IdFactura = fac.IdFactura
+          SELECT 1 FROM [cfl].[PlanillaSapFactura] psf
+          WHERE psf.IdFactura = fac.IdFactura
         )
       ORDER BY fac.FechaEmision DESC, fac.IdFactura DESC;
     `);

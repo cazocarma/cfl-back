@@ -466,9 +466,10 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
       return;
     }
 
-    if (normalizeLifecycleStatus(existing.Estado) === LIFECYCLE_STATUS.FACTURADO) {
+    const estadoActual = normalizeLifecycleStatus(existing.Estado);
+    if (estadoActual === LIFECYCLE_STATUS.FACTURADO || estadoActual === LIFECYCLE_STATUS.PREFACTURADO) {
       await transaction.rollback();
-      res.status(409).json({ error: "El flete FACTURADO no se puede modificar" });
+      res.status(409).json({ error: `El flete ${estadoActual} no se puede modificar` });
       return;
     }
 

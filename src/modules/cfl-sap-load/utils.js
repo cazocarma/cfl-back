@@ -120,6 +120,14 @@ function normalizeVbeln(value) {
   return normalized;
 }
 
+function normalizeXblnr(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (!normalized || normalized.length > 16 || !/^[A-Z0-9]+$/.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
 function inclusiveDateRangeDays(fromDate, toDate) {
   const diffMs = toDate.getTime() - fromDate.getTime();
   return Math.floor(diffMs / 86400000) + 1;
@@ -138,6 +146,14 @@ function buildSourceName(job) {
     return `CFL OnDemand ${count} VBELN via SAP Adapter`;
   }
 
+  if (job.job_type === JOB_TYPE.XBLNR) {
+    const count = Array.isArray(job.xblnrs) ? job.xblnrs.length : 0;
+    if (count === 1) {
+      return `CFL OnDemand XBLNR ${job.xblnrs[0]} via SAP Adapter`;
+    }
+    return `CFL OnDemand ${count} XBLNR via SAP Adapter`;
+  }
+
   return `CFL OnDemand DateRange ${job.fecha_desde}..${job.fecha_hasta} via SAP Adapter`;
 }
 
@@ -145,6 +161,11 @@ function buildScopeKey(job) {
   if (job.job_type === JOB_TYPE.VBELN) {
     const normalizedVbelns = Array.isArray(job.vbelns) ? [...job.vbelns].sort() : [];
     return `${job.destination}|VBELN|${normalizedVbelns.join(",")}`;
+  }
+
+  if (job.job_type === JOB_TYPE.XBLNR) {
+    const normalizedXblnrs = Array.isArray(job.xblnrs) ? [...job.xblnrs].sort() : [];
+    return `${job.destination}|XBLNR|${normalizedXblnrs.join(",")}`;
   }
 
   return `${job.destination}|DATE_RANGE|${job.fecha_desde}|${job.fecha_hasta}`;
@@ -155,7 +176,8 @@ function serializeJobParams(job) {
     job_type: job.job_type,
     destination: job.destination,
     source_system: job.destination,
-    vbeln: Array.isArray(job.vbelns) ? job.vbelns : null,
+    vbeln: Array.isArray(job.vbelns) && job.vbelns.length > 0 ? job.vbelns : null,
+    xblnr: Array.isArray(job.xblnrs) && job.xblnrs.length > 0 ? job.xblnrs : null,
     fecha_desde: job.fecha_desde || null,
     fecha_hasta: job.fecha_hasta || null,
     requested_by: {
@@ -191,6 +213,7 @@ module.exports = {
   formatDateToSap,
   normalizeDestination,
   normalizeVbeln,
+  normalizeXblnr,
   inclusiveDateRangeDays,
   buildSourceSystem,
   buildSourceName,

@@ -62,16 +62,13 @@ function buildColumns() {
     { label: 'Valor',       w: 58, align: 'right' },
   ];
 
-  // Scale proportionally to fit CONTENT_W
   const totalW = defs.reduce((s, c) => s + c.w, 0);
   const factor = CONTENT_W / totalW;
   for (const c of defs) c.w = Math.round(c.w * factor);
 
-  // Absorb rounding error in Ruta column (index 6)
   const diff = CONTENT_W - defs.reduce((s, c) => s + c.w, 0);
   if (diff !== 0) defs[6].w += diff;
 
-  // Compute x positions
   let x = MARGIN_L;
   for (const c of defs) { c.x = x; x += c.w; }
 
@@ -80,18 +77,28 @@ function buildColumns() {
 
 // ── PDF rendering ───────────────────────────────────────────────────────────
 
-/**
- * Genera un PDFDocument con la pre factura y lo pipea al stream de salida.
- * @param {object} factura - Datos completos de la factura (de fetchFactura).
- * @param {import('stream').Writable} outputStream - Stream de salida (e.g., res de Express).
- */
 function generatePreFacturaPdf(factura, outputStream) {
   const PDFDocument = require('pdfkit');
   const doc = new PDFDocument({ size: 'LETTER', layout: 'landscape', margin: MARGIN_L });
   doc.pipe(outputStream);
   const cols = buildColumns();
 
-  // ── Helpers ligados al doc ────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────────────────
+
+  function drawDocHeader() {
+    doc.rect(0, 0, PAGE_W, HEADER_BAR_H).fill(BRAND_COLOR);
+    doc.fontSize(20).font('Helvetica-Bold').fillColor('#ffffff')
+      .text('PRE FACTURA', MARGIN_L, 10, { width: 300 });
+    doc.fontSize(10).font('Helvetica').fillColor('#a7f3d0')
+      .text(factura.numero_factura, MARGIN_L, 32, { width: 300 });
+    doc.fontSize(10).font('Helvetica-Bold').fillColor('#ffffff')
+      .text('Greenvic SPA', PAGE_W - MARGIN_R - 240, 6, { width: 232, align: 'right' });
+    doc.fontSize(6.5).font('Helvetica').fillColor('#d1fae5')
+      .text('Apoquindo 4700 Of. 901, Las Condes, Santiago', PAGE_W - MARGIN_R - 240, 19, { width: 232, align: 'right' });
+    doc.fontSize(6.5).fillColor('#a7f3d0')
+      .text(`RUT: ${GREENVIC_RUT}`, PAGE_W - MARGIN_R - 240, 30, { width: 232, align: 'right' });
+    doc.fillColor('#000000');
+  }
 
   function drawTableHeader(y) {
     doc.rect(MARGIN_L, y, CONTENT_W, TABLE_HEADER_H).fill('#f0fdf4');
@@ -105,17 +112,17 @@ function generatePreFacturaPdf(factura, outputStream) {
     return y + TABLE_HEADER_H;
   }
 
-  function drawPageFooter() {
-    doc.fontSize(6).font('Helvetica').fillColor('#999999').text(
-      `Pre Factura ${factura.numero_factura} — pág. ${doc.bufferedPageRange().count}`,
-      MARGIN_L, FOOTER_Y, { width: CONTENT_W, align: 'center' },
-    );
+  function newTablePage() {
+    doc.addPage();
+    drawDocHeader();
+    return drawTableHeader(HEADER_BAR_H + 8);
   }
 
-  function newPage() {
-    drawPageFooter();
-    doc.addPage();
-    return drawTableHeader(30);
+  function ensureSpace(tableY, neededH) {
+    if (tableY + neededH > TABLE_BOTTOM) {
+      return newTablePage();
+    }
+    return tableY;
   }
 
   function measureCellH(text, colW) {
@@ -123,25 +130,10 @@ function generatePreFacturaPdf(factura, outputStream) {
       .heightOfString(String(text || ''), { width: colW - CELL_PAD * 2 });
   }
 
-  // ── Encabezado (barra verde) ──────────────────────────────────────────────
+  // ── Page 1: Header bar ────────────────────────────────────────────────────
+  drawDocHeader();
 
-  doc.rect(0, 0, PAGE_W, HEADER_BAR_H).fill(BRAND_COLOR);
-
-  // Izquierda: PRE FACTURA (grande) + número
-  doc.fontSize(20).font('Helvetica-Bold').fillColor('#ffffff')
-    .text('PRE FACTURA', MARGIN_L, 6, { width: 300 });
-  doc.fontSize(10).font('Helvetica').fillColor('#a7f3d0')
-    .text(factura.numero_factura, MARGIN_L, 30, { width: 300 });
-
-  // Derecha: Greenvic SPA + dirección + RUT
-  doc.fontSize(10).font('Helvetica-Bold').fillColor('#ffffff')
-    .text('Greenvic SPA', PAGE_W - MARGIN_R - 240, 6, { width: 232, align: 'right' });
-  doc.fontSize(6.5).font('Helvetica').fillColor('#d1fae5')
-    .text('Apoquindo 4700 Of. 901, Las Condes, Santiago', PAGE_W - MARGIN_R - 240, 19, { width: 232, align: 'right' });
-  doc.fontSize(6.5).fillColor('#a7f3d0')
-    .text(`RUT: ${GREENVIC_RUT}`, PAGE_W - MARGIN_R - 240, 30, { width: 232, align: 'right' });
-
-  // ── Metadata (una sola columna) ─────────────────────────────────────────
+  // ── Metadata ──────────────────────────────────────────────────────────────
 
   doc.fillColor('#000000');
   let infoY = 58;
@@ -149,7 +141,7 @@ function generatePreFacturaPdf(factura, outputStream) {
     .text(factura.empresa_nombre, MARGIN_L, infoY);
   doc.font('Helvetica').fontSize(7);
   doc.text(`RUT: ${factura.empresa_rut || '-'}`, MARGIN_L, infoY + 11);
-  doc.text(`Fecha emisión: ${formatDate(factura.fecha_emision)}`, MARGIN_L, infoY + 22);
+  doc.text(`Fecha emision: ${formatDate(factura.fecha_emision)}`, MARGIN_L, infoY + 22);
   doc.text(`Moneda: ${factura.moneda}`, MARGIN_L, infoY + 33);
 
   if (factura.observaciones) {
@@ -171,7 +163,6 @@ function generatePreFacturaPdf(factura, outputStream) {
   for (const m of factura.movimientos) {
     const detalles = m.detalles || [];
 
-    // Datos formateados
     const choferRut = m.chofer_rut || '';
     const choferNombre = m.chofer_nombre || '-';
     const prodCodigo = m.productor_codigo || '';
@@ -179,7 +170,7 @@ function generatePreFacturaPdf(factura, outputStream) {
     const rutaText = m.ruta || '-';
     const ccText = `${m.centro_costo_codigo || '-'}\n${m.centro_costo || ''}`.trim();
 
-    // Altura dinámica basada en celdas con wrap
+    // Dynamic row height
     const wrapCells = [
       { text: rutaText, w: cols[6].w },
       { text: `${choferRut}\n${choferNombre}`, w: cols[5].w },
@@ -196,13 +187,10 @@ function generatePreFacturaPdf(factura, outputStream) {
     const detailBlockH = detalles.length > 0 ? (detalles.length * DETAIL_ROW_H + 14) : 0;
     const rowH = mainRowH + detailBlockH;
 
-    // Salto de página
-    if (tableY + rowH > TABLE_BOTTOM) {
-      tableY = newPage();
-      rowIdx = 0;
-    }
+    // Page break if needed — only creates new page if there's actual content to draw
+    tableY = ensureSpace(tableY, rowH);
 
-    // Fondo alterno + separador
+    // Alternating row background + separator
     if (rowIdx % 2 === 0) {
       doc.rect(MARGIN_L, tableY, CONTENT_W, rowH).fill('#fafafa');
     }
@@ -212,7 +200,7 @@ function generatePreFacturaPdf(factura, outputStream) {
     const guia = m.GuiaRemision || m.NumeroEntrega || m.SapNumeroEntrega || '-';
     const ly = tableY + 3;
 
-    // Celdas principales
+    // Main cells
     doc.font('Helvetica').fontSize(FONT_SIZE).fillColor('#1a1a1a');
     doc.text(formatDate(m.FechaSalida), cols[0].x + CELL_PAD, ly, { width: cols[0].w - CELL_PAD * 2 });
     doc.text(tipoMovLabel(m.TipoMovimiento), cols[1].x + CELL_PAD, ly, { width: cols[1].w - CELL_PAD * 2 });
@@ -220,25 +208,25 @@ function generatePreFacturaPdf(factura, outputStream) {
     doc.text(String(m.tipo_camion || '-'), cols[3].x + CELL_PAD, ly, { width: cols[3].w - CELL_PAD * 2 });
     doc.text(String(m.camion_patente || '-'), cols[4].x + CELL_PAD, ly, { width: cols[4].w - CELL_PAD * 2 });
 
-    // Chofer: RUT + nombre
+    // Chofer
     doc.font('Helvetica-Bold').fontSize(FONT_SIZE).fillColor('#1a1a1a');
     doc.text(choferRut || '-', cols[5].x + CELL_PAD, ly, { width: cols[5].w - CELL_PAD * 2, lineBreak: false });
     doc.font('Helvetica').fontSize(FONT_SIZE);
     doc.text(choferNombre, cols[5].x + CELL_PAD, ly + 8, { width: cols[5].w - CELL_PAD * 2 });
 
-    // Ruta (con wrap)
+    // Ruta
     doc.text(rutaText, cols[6].x + CELL_PAD, ly, { width: cols[6].w - CELL_PAD * 2 });
 
     // Detalle viaje
     doc.text(String(m.detalle_viaje || '-'), cols[7].x + CELL_PAD, ly, { width: cols[7].w - CELL_PAD * 2 });
 
-    // Productor: código + nombre
+    // Productor
     doc.font('Helvetica-Bold').fontSize(FONT_SIZE).fillColor('#1a1a1a');
     doc.text(prodCodigo || '-', cols[8].x + CELL_PAD, ly, { width: cols[8].w - CELL_PAD * 2, lineBreak: false });
     doc.font('Helvetica').fontSize(FONT_SIZE);
     doc.text(prodNombre, cols[8].x + CELL_PAD, ly + 8, { width: cols[8].w - CELL_PAD * 2 });
 
-    // Centro costo (código + nombre)
+    // Centro costo
     doc.text(ccText, cols[9].x + CELL_PAD, ly, { width: cols[9].w - CELL_PAD * 2 });
 
     // Tipo flete
@@ -248,24 +236,25 @@ function generatePreFacturaPdf(factura, outputStream) {
     doc.font('Helvetica-Bold').fontSize(FONT_SIZE).fillColor('#1a1a1a');
     doc.text(formatCLP(m.MontoAplicado), cols[11].x + CELL_PAD, ly, { width: cols[11].w - CELL_PAD * 2, align: 'right' });
 
-    // Sub-filas de detalle (material / especie / cantidad)
+    // Detail sub-rows
     if (detalles.length > 0) {
       const detStartY = tableY + mainRowH;
       const detailX = MARGIN_L + detailIndent;
       const detailW = CONTENT_W - detailIndent - 10;
 
-      // Encabezado de detalle
       doc.font('Helvetica-Bold').fontSize(DETAIL_FONT_SIZE).fillColor(BRAND_COLOR);
-      doc.text('Material', detailX, detStartY, { width: detailW * 0.45, lineBreak: false });
-      doc.text('Especie', detailX + detailW * 0.45, detStartY, { width: detailW * 0.35, lineBreak: false });
-      doc.text('Cantidad', detailX + detailW * 0.80, detStartY, { width: detailW * 0.20, align: 'right', lineBreak: false });
+      doc.text('Material', detailX, detStartY, { width: detailW * 0.30, lineBreak: false });
+      doc.text('Descripcion', detailX + detailW * 0.30, detStartY, { width: detailW * 0.30, lineBreak: false });
+      doc.text('Especie', detailX + detailW * 0.60, detStartY, { width: detailW * 0.25, lineBreak: false });
+      doc.text('Cantidad', detailX + detailW * 0.85, detStartY, { width: detailW * 0.15, align: 'right', lineBreak: false });
 
       doc.font('Helvetica').fontSize(DETAIL_FONT_SIZE).fillColor('#444444');
       let subY = detStartY + DETAIL_ROW_H;
       for (const det of detalles) {
-        doc.text(det.Material || det.Descripcion || '-', detailX, subY, { width: detailW * 0.45, lineBreak: false });
-        doc.text(det.especie_glosa || '-', detailX + detailW * 0.45, subY, { width: detailW * 0.35, lineBreak: false });
-        doc.text(det.Cantidad != null ? String(det.Cantidad) : '-', detailX + detailW * 0.80, subY, { width: detailW * 0.20, align: 'right', lineBreak: false });
+        doc.text(det.Material || '-', detailX, subY, { width: detailW * 0.30, lineBreak: false });
+        doc.text(det.Descripcion || '-', detailX + detailW * 0.30, subY, { width: detailW * 0.30, lineBreak: false });
+        doc.text(det.especie_glosa || '-', detailX + detailW * 0.60, subY, { width: detailW * 0.25, lineBreak: false });
+        doc.text(det.Cantidad != null ? String(det.Cantidad) : '-', detailX + detailW * 0.85, subY, { width: detailW * 0.15, align: 'right', lineBreak: false });
         subY += DETAIL_ROW_H;
       }
     }
@@ -275,7 +264,7 @@ function generatePreFacturaPdf(factura, outputStream) {
     rowIdx++;
   }
 
-  // ── Línea final + Totales ─────────────────────────────────────────────────
+  // ── Totals ────────────────────────────────────────────────────────────────
 
   doc.moveTo(MARGIN_L, tableY).lineTo(PAGE_W - MARGIN_R, tableY)
     .lineWidth(0.5).strokeColor('#c4c4c4').stroke();
@@ -283,7 +272,9 @@ function generatePreFacturaPdf(factura, outputStream) {
 
   const totalsBlockH = 70;
   if (tableY + totalsBlockH > TABLE_BOTTOM) {
-    tableY = newPage();
+    doc.addPage();
+    drawDocHeader();
+    tableY = HEADER_BAR_H + 20;
   }
 
   const totalsX = PAGE_W - MARGIN_R - 220;
@@ -309,9 +300,6 @@ function generatePreFacturaPdf(factura, outputStream) {
   doc.font('Helvetica-Bold').fontSize(13).fillColor(BRAND_COLOR);
   doc.text('Total:', totalsX, tableY, { width: lblW });
   doc.text(formatCLP(factura.monto_total), totalsX + lblW, tableY, { width: valW, align: 'right' });
-
-  // ── Pie de página ─────────────────────────────────────────────────────────
-  drawPageFooter();
 
   doc.end();
   return doc;

@@ -10,6 +10,7 @@ const JOB_STATUS = {
 
 const JOB_TYPE = {
   VBELN: "VBELN",
+  XBLNR: "XBLNR",
   DATE_RANGE: "DATE_RANGE",
 };
 

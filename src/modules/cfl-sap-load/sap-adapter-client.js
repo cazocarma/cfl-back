@@ -171,7 +171,17 @@ async function extractByVbeln(destination, vbeln) {
   const qs = `destination=${encodeURIComponent(destination)}&includeDeliveryTypeTexts=true`;
   const data = await callSapAdapter(
     "GET",
-    `/api/v1/cfl/deliveries/${encodeURIComponent(vbeln)}?${qs}`,
+    `/api/v1/cfl/deliveries/by-vbeln/${encodeURIComponent(vbeln)}?${qs}`,
+    null
+  );
+  return mapCflResponseToExtraction(data);
+}
+
+async function extractByXblnr(destination, xblnr) {
+  const qs = `destination=${encodeURIComponent(destination)}&includeDeliveryTypeTexts=true`;
+  const data = await callSapAdapter(
+    "GET",
+    `/api/v1/cfl/deliveries/by-xblnr/${encodeURIComponent(xblnr)}?${qs}`,
     null
   );
   return mapCflResponseToExtraction(data);
@@ -193,5 +203,6 @@ async function extractByDateRange(destination, fromDate, toDate) {
 
 module.exports = {
   extractByVbeln,
+  extractByXblnr,
   extractByDateRange,
 };

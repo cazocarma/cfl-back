@@ -25,16 +25,38 @@ async function fetchPlanilla(pool, idPlanilla) {
   const hdr = await pool.request()
     .input('id', sql.BigInt, idPlanilla)
     .query(`
-      SELECT p.*,
-        fac.NumeroFactura,
-        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa))
+      SELECT p.*
       FROM [cfl].[PlanillaSap] p
-      INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = p.IdFactura
-      LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = fac.IdEmpresa
       WHERE p.IdPlanillaSap = @id;
     `);
   if (!hdr.recordset[0]) return null;
   const planilla = hdr.recordset[0];
+
+  // Facturas vinculadas via tabla puente
+  const facs = await pool.request()
+    .input('id', sql.BigInt, idPlanilla)
+    .query(`
+      SELECT psf.IdFactura, fac.NumeroFactura, fac.NumeroFacturaRecibida,
+        empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa))
+      FROM [cfl].[PlanillaSapFactura] psf
+      INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = psf.IdFactura
+      LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = fac.IdEmpresa
+      WHERE psf.IdPlanillaSap = @id
+      ORDER BY fac.NumeroFactura;
+    `);
+  planilla.facturas = facs.recordset;
+
+  // Resumen para compatibilidad (primer factura o concatenación)
+  if (facs.recordset.length === 1) {
+    planilla.numero_factura = facs.recordset[0].numero_factura;
+    planilla.empresa_nombre = facs.recordset[0].empresa_nombre;
+  } else if (facs.recordset.length > 1) {
+    planilla.numero_factura = facs.recordset.map(f => f.numero_factura).join(', ');
+    planilla.empresa_nombre = [...new Set(facs.recordset.map(f => f.empresa_nombre))].join(', ');
+  } else {
+    planilla.numero_factura = '';
+    planilla.empresa_nombre = '';
+  }
 
   const docs = await pool.request()
     .input('id', sql.BigInt, idPlanilla)
@@ -74,16 +96,89 @@ router.get('/', async (req, res, next) => {
   try {
     const pool = await getPool();
     const result = await pool.request().query(`
-      SELECT p.IdPlanillaSap, p.IdFactura, p.FechaDocumento, p.FechaContabilizacion,
+      SELECT p.IdPlanillaSap, p.FechaDocumento, p.FechaContabilizacion,
              p.GlosaCabecera, p.TotalLineas, p.TotalDocumentos, p.MontoTotal,
              p.Estado, p.FechaCreacion, p.Temporada,
-             fac.NumeroFactura,
-             empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa))
+             facturas_count = (
+               SELECT COUNT(*) FROM [cfl].[PlanillaSapFactura] psf
+               WHERE psf.IdPlanillaSap = p.IdPlanillaSap
+             ),
+             facturas_numeros = (
+               SELECT STRING_AGG(fac.NumeroFactura, ', ')
+               FROM [cfl].[PlanillaSapFactura] psf
+               INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = psf.IdFactura
+               WHERE psf.IdPlanillaSap = p.IdPlanillaSap
+             ),
+             empresas_nombres = (
+               SELECT STRING_AGG(sub.empresa_nombre, ', ')
+               FROM (
+                 SELECT DISTINCT
+                   empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa))
+                 FROM [cfl].[PlanillaSapFactura] psf
+                 INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = psf.IdFactura
+                 LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = fac.IdEmpresa
+                 WHERE psf.IdPlanillaSap = p.IdPlanillaSap
+               ) sub
+             )
       FROM [cfl].[PlanillaSap] p
-      INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = p.IdFactura
-      LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = fac.IdEmpresa
       ORDER BY p.FechaCreacion DESC;
     `);
+    res.json({ data: result.recordset });
+  } catch (err) { next(err); }
+});
+
+// ---------------------------------------------------------------------------
+// GET /planillas-sap/movimientos — movements for planilla generation
+// ---------------------------------------------------------------------------
+router.get('/movimientos', async (req, res, next) => {
+  const raw = req.query.facturas_ids;
+  if (!raw) { res.status(400).json({ error: 'facturas_ids requerido' }); return; }
+
+  const ids = String(raw).split(',').map(Number).filter(n => Number.isFinite(n) && n > 0);
+  if (ids.length === 0) { res.status(400).json({ error: 'facturas_ids inválido' }); return; }
+
+  try {
+    const pool = await getPool();
+    const request = pool.request();
+
+    // Build safe IN clause with parameters
+    const paramClauses = ids.map((id, i) => {
+      request.input(`fid${i}`, sql.BigInt, id);
+      return `@fid${i}`;
+    });
+
+    const result = await request.query(`
+      SELECT
+        cf.IdCabeceraFlete,
+        cf.IdFactura,
+        fac.NumeroFactura,
+        cf.FechaSalida,
+        cf.GuiaRemision AS NumeroGuia,
+        cc.SapCodigo AS CentroCostoCodigo,
+        cm.Codigo AS CuentaMayorCodigo,
+        cm.Glosa AS CuentaMayorGlosa,
+        cf.IdProductor,
+        prod.Nombre AS ProductorNombre,
+        prod.CodigoProveedor,
+        cf.MontoAplicado,
+        especie_nombre = (
+          SELECT TOP 1 esp.Glosa
+          FROM [cfl].[DetalleFlete] df
+          INNER JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
+          WHERE df.IdCabeceraFlete = cf.IdCabeceraFlete
+        ),
+        tf.Nombre AS TipoFleteNombre
+      FROM [cfl].[CabeceraFlete] cf
+      INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = cf.IdFactura
+      LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
+      LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
+      LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
+      WHERE cf.IdFactura IN (${paramClauses.join(',')})
+        AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO', 'COMPLETADO')
+      ORDER BY fac.NumeroFactura, cc.SapCodigo, cm.Codigo, prod.Nombre;
+    `);
+
     res.json({ data: result.recordset });
   } catch (err) { next(err); }
 });
@@ -103,15 +198,17 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /planillas-sap/generar — generate from a pre-factura
+// POST /planillas-sap/generar — generate from selected movements
 // ---------------------------------------------------------------------------
 router.post('/generar', validate({ body: generarBody }), async (req, res, next) => {
   const { allowed } = await checkPlanillasPerm(req);
   if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
 
   const {
-    id_factura, fecha_documento, fecha_contabilizacion,
-    glosa_cabecera, temporada, codigo_cargo_abono, glosa_cargo_abono,
+    facturas_ids, movimientos_ids,
+    fecha_documento, fecha_contabilizacion,
+    glosa_cabecera,
+    temporada, codigo_cargo_abono, glosa_cargo_abono,
     indicador_impuesto, productores_oc,
   } = req.body;
 
@@ -119,13 +216,26 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
   try {
     const pool = await getPool();
 
-    // Verify factura exists and is recibida or borrador
-    const facCheck = await pool.request()
-      .input('idFactura', sql.BigInt, id_factura)
-      .query(`SELECT IdFactura, estado FROM [cfl].[CabeceraFactura] WHERE IdFactura = @idFactura;`);
-    if (!facCheck.recordset[0]) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
+    // Verify all facturas exist and are in valid state
+    const facRequest = pool.request();
+    const facParams = facturas_ids.map((id, i) => {
+      facRequest.input(`fid${i}`, sql.BigInt, id);
+      return `@fid${i}`;
+    });
+    const facCheck = await facRequest.query(`
+      SELECT IdFactura, Estado, NumeroFactura, NumeroFacturaRecibida
+      FROM [cfl].[CabeceraFactura]
+      WHERE IdFactura IN (${facParams.join(',')});
+    `);
 
-    // Build OC lookup from user input
+    if (facCheck.recordset.length !== facturas_ids.length) {
+      const found = new Set(facCheck.recordset.map(r => r.id_factura));
+      const missing = facturas_ids.filter(id => !found.has(id));
+      res.status(404).json({ error: `Facturas no encontradas: ${missing.join(', ')}` });
+      return;
+    }
+
+    // Build OC lookup
     const ocMap = {};
     if (productores_oc) {
       for (const p of productores_oc) {
@@ -133,58 +243,97 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       }
     }
 
-    // Fetch movements grouped by (centro_costo, cuenta_mayor) then by producer
-    const movData = await pool.request()
-      .input('idFactura', sql.BigInt, id_factura)
-      .query(`
-        SELECT
-          cf.IdCentroCosto, cc.SapCodigo AS CentroCostoCodigo,
-          cf.IdCuentaMayor, cm.Codigo AS CuentaMayorCodigo,
-          cf.IdProductor,
-          prod.CodigoProveedor, prod.Nombre AS ProductorNombre,
-          SUM(cf.MontoAplicado) AS MontoProductor,
-          especie_primaria = (
-            SELECT TOP 1 esp.Glosa
-            FROM [cfl].[DetalleFlete] df
-            INNER JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
-            WHERE df.IdCabeceraFlete IN (
-              SELECT MIN(cf2.IdCabeceraFlete)
-              FROM [cfl].[CabeceraFlete] cf2
-              WHERE cf2.IdFactura = cf.IdFactura AND cf2.IdProductor = cf.IdProductor
-                AND cf2.IdCentroCosto = cf.IdCentroCosto
-            )
-          )
-        FROM [cfl].[CabeceraFlete] cf
-        LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
-        LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
-        LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
-        WHERE cf.IdFactura = @idFactura
-          AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO')
-        GROUP BY cf.IdFactura, cf.IdCentroCosto, cc.SapCodigo,
-                 cf.IdCuentaMayor, cm.Codigo, cf.IdProductor,
-                 prod.CodigoProveedor, prod.Nombre
-        ORDER BY cc.SapCodigo, prod.Nombre;
-      `);
+    // Fetch selected movements grouped by (factura, centro_costo, cuenta_mayor, productor)
+    const movRequest = pool.request();
+    const movParams = movimientos_ids.map((id, i) => {
+      movRequest.input(`mid${i}`, sql.BigInt, id);
+      return `@mid${i}`;
+    });
+    const facParamsMov = facturas_ids.map((id, i) => {
+      movRequest.input(`sfid${i}`, sql.BigInt, id);
+      return `@sfid${i}`;
+    });
+
+    const movData = await movRequest.query(`
+      SELECT
+        cf.IdFactura,
+        fac.NumeroFactura,
+        fac.NumeroFacturaRecibida,
+        cc.SapCodigo AS CentroCostoCodigo,
+        cm.Codigo AS CuentaMayorCodigo,
+        cf.IdProductor,
+        prod.CodigoProveedor, prod.Nombre AS ProductorNombre,
+        EspecieNombre = (
+          SELECT TOP 1 esp.Glosa
+          FROM [cfl].[DetalleFlete] df
+          INNER JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
+          WHERE df.IdCabeceraFlete = cf.IdCabeceraFlete
+          ORDER BY COALESCE(df.Cantidad, 0) DESC, COALESCE(df.Peso, 0) DESC
+        ),
+        cf.MontoAplicado
+      FROM [cfl].[CabeceraFlete] cf
+      INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = cf.IdFactura
+      LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
+      LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
+      WHERE cf.IdCabeceraFlete IN (${movParams.join(',')})
+        AND cf.IdFactura IN (${facParamsMov.join(',')})
+        AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO', 'COMPLETADO')
+      ORDER BY fac.NumeroFactura, cc.SapCodigo, cm.Codigo, prod.Nombre;
+    `);
 
     if (!movData.recordset.length) {
-      res.status(422).json({ error: 'No hay movimientos para generar la planilla' });
+      res.status(422).json({ error: 'No hay movimientos válidos para generar la planilla' });
       return;
     }
 
-    // Group into SAP documents: each unique CentroCostoCodigo = 1 document
+    // Validate all producers have CodigoProveedor
+    const sinCodigo = movData.recordset.filter(r => !r.codigo_proveedor);
+    if (sinCodigo.length > 0) {
+      const nombres = [...new Set(sinCodigo.map(r => r.productor_nombre || `Productor #${r.id_productor}`))];
+      res.status(422).json({
+        error: `Productores sin código SAP: ${nombres.join(', ')}. Asigne un CodigoProveedor antes de generar.`,
+      });
+      return;
+    }
+
+    // Group into SAP documents: each unique Factura + CC + CuentaMayor = 1 document
+    // Within each document, group credit lines by Productor + Especie
     const docGroups = new Map();
     for (const row of movData.recordset) {
-      const key = `${row.centro_costo_codigo || 'SIN_CC'}`;
-      if (!docGroups.has(key)) {
-        docGroups.set(key, {
-          id_centro_costo: row.id_centro_costo,
+      const docKey = `${row.id_factura}|${row.centro_costo_codigo || 'SIN_CC'}|${row.cuenta_mayor_codigo || 'SIN_CM'}`;
+      if (!docGroups.has(docKey)) {
+        docGroups.set(docKey, {
           centro_costo_codigo: row.centro_costo_codigo,
-          id_cuenta_mayor: row.id_cuenta_mayor,
           cuenta_mayor_codigo: row.cuenta_mayor_codigo,
-          productores: [],
+          numero_factura_recibida: row.numero_factura_recibida || null,
+          numero_pre_factura: row.numero_factura || null,
+          lineas: new Map(), // keyed by productor|especie
         });
       }
-      docGroups.get(key).productores.push(row);
+      const doc = docGroups.get(docKey);
+      const lineKey = `${row.id_productor}|${row.especie_nombre || ''}`;
+      if (!doc.lineas.has(lineKey)) {
+        doc.lineas.set(lineKey, {
+          id_productor: row.id_productor,
+          codigo_proveedor: row.codigo_proveedor,
+          productor_nombre: row.productor_nombre,
+          especie: row.especie_nombre || null,
+          monto: 0,
+        });
+      }
+      doc.lineas.get(lineKey).monto += Number(row.monto_aplicado || 0);
+    }
+
+    // Build warnings
+    const warnings = [];
+    const productoresConOc = new Set(Object.keys(ocMap).map(Number));
+    const todosProductores = new Set(movData.recordset.map(r => r.id_productor));
+    for (const pid of todosProductores) {
+      if (!productoresConOc.has(pid)) {
+        const nombre = movData.recordset.find(r => r.id_productor === pid)?.productor_nombre;
+        warnings.push(`Productor "${nombre || pid}" sin Orden de Compra asignada`);
+      }
     }
 
     // Start transaction
@@ -193,8 +342,8 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
     const now = new Date();
 
     // Insert PlanillaSap header
+    const idUsuario = Number(req.jwtPayload?.id_usuario) || null;
     const insertHdr = await new sql.Request(transaction)
-      .input('idFactura', sql.BigInt, id_factura)
       .input('fechaDoc', sql.Date, new Date(fecha_documento))
       .input('fechaContab', sql.Date, new Date(fecha_contabilizacion))
       .input('glosa', sql.NVarChar(100), glosa_cabecera)
@@ -203,19 +352,31 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       .input('glosaCA', sql.NVarChar(100), glosa_cargo_abono || null)
       .input('indicadorImp', sql.NVarChar(10), indicador_impuesto || 'C0')
       .input('estado', sql.NVarChar(20), 'generada')
+      .input('idUsuario', sql.BigInt, idUsuario)
       .input('createdAt', sql.DateTime2(0), now)
       .query(`
         INSERT INTO [cfl].[PlanillaSap]
-          (IdFactura, FechaDocumento, FechaContabilizacion, GlosaCabecera,
+          (FechaDocumento, FechaContabilizacion, GlosaCabecera,
            Temporada, CodigoCargoAbono, GlosaCargoAbono, IndicadorImpuesto,
-           Estado, FechaCreacion, FechaActualizacion)
+           Estado, IdUsuarioCreador, FechaCreacion, FechaActualizacion)
         OUTPUT INSERTED.IdPlanillaSap
         VALUES
-          (@idFactura, @fechaDoc, @fechaContab, @glosa,
+          (@fechaDoc, @fechaContab, @glosa,
            @temporada, @codigoCA, @glosaCA, @indicadorImp,
-           @estado, @createdAt, @createdAt);
+           @estado, @idUsuario, @createdAt, @createdAt);
       `);
     const idPlanilla = Number(insertHdr.recordset[0].id_planilla_sap);
+
+    // Insert PlanillaSapFactura records (N:N bridge)
+    for (const facId of facturas_ids) {
+      await new sql.Request(transaction)
+        .input('idPlanilla', sql.BigInt, idPlanilla)
+        .input('idFactura', sql.BigInt, facId)
+        .query(`
+          INSERT INTO [cfl].[PlanillaSapFactura] (IdPlanillaSap, IdFactura)
+          VALUES (@idPlanilla, @idFactura);
+        `);
+    }
 
     let totalLineas = 0;
     let montoTotal = 0;
@@ -223,35 +384,44 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
 
     for (const [, group] of docGroups) {
       docNum++;
-      const montoDebito = group.productores.reduce((s, p) => s + Number(p.monto_productor || 0), 0);
+      const creditLines = Array.from(group.lineas.values());
+      const montoDebito = creditLines.reduce((s, l) => s + l.monto, 0);
       montoTotal += montoDebito;
+
+      // Per-document referencia and texto derived from the factura
+      const docReferencia = group.numero_factura_recibida || null;
+      const docTextoCredito = group.numero_pre_factura
+        ? `PREFACTURA ${group.numero_pre_factura}`
+        : glosa_cabecera;
 
       // Insert document
       const insertDoc = await new sql.Request(transaction)
         .input('idPlanilla', sql.BigInt, idPlanilla)
         .input('numDoc', sql.Int, docNum)
-        .input('idCC', sql.BigInt, group.id_centro_costo)
         .input('ccCodigo', sql.NVarChar(20), group.centro_costo_codigo)
-        .input('idCM', sql.BigInt, group.id_cuenta_mayor)
         .input('cmCodigo', sql.NVarChar(30), group.cuenta_mayor_codigo)
+        .input('docRef', sql.NVarChar(60), docReferencia)
+        .input('docPreFac', sql.NVarChar(40), group.numero_pre_factura)
         .input('montoDebito', sql.Decimal(18, 2), montoDebito)
-        .input('totalLineas', sql.Int, 1 + group.productores.length)
+        .input('totalLineas', sql.Int, 1 + creditLines.length)
         .query(`
           INSERT INTO [cfl].[PlanillaSapDocumento]
             (IdPlanillaSap, NumeroDocumento,
-             IdCentroCosto, CentroCostoCodigo, IdCuentaMayor, CuentaMayorCodigo,
+             CentroCostoCodigo, CuentaMayorCodigo,
+             Referencia, NumeroPreFactura,
              MontoDebito, TotalLineas)
           OUTPUT INSERTED.IdPlanillaSapDocumento
           VALUES
             (@idPlanilla, @numDoc,
-             @idCC, @ccCodigo, @idCM, @cmCodigo, @montoDebito, @totalLineas);
+             @ccCodigo, @cmCodigo,
+             @docRef, @docPreFac,
+             @montoDebito, @totalLineas);
         `);
       const idDoc = Number(insertDoc.recordset[0].id_planilla_sap_documento);
 
       let lineNum = 0;
-      const textoLinea = `FLETES PREFACTURA ${id_factura}`.trim();
 
-      // Debit line (header)
+      // Debit line (header, clave 50)
       lineNum++;
       totalLineas++;
       await new sql.Request(transaction)
@@ -262,38 +432,39 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
         .input('cuentaMayor', sql.NVarChar(30), group.cuenta_mayor_codigo)
         .input('importe', sql.Decimal(18, 2), -montoDebito)
         .input('centroCosto', sql.NVarChar(20), group.centro_costo_codigo)
-        .input('textoLinea', sql.NVarChar(100), textoLinea)
+        .input('nroAsignacion', sql.NVarChar(100), docReferencia)
+        .input('textoLinea', sql.NVarChar(100), glosa_cabecera)
         .input('indicadorImp', sql.NVarChar(10), indicador_impuesto || 'C0')
         .input('temporada', sql.NVarChar(20), temporada || null)
         .input('tipoCA', sql.NVarChar(20), codigo_cargo_abono || null)
         .query(`
           INSERT INTO [cfl].[PlanillaSapLinea]
             (IdPlanillaSapDocumento, NumeroLinea, EsDocNuevo, ClaveContabilizacion,
-             CuentaMayor, Importe, CentroCosto, TextoLinea,
+             CuentaMayor, Importe, CentroCosto, NroAsignacion, TextoLinea,
              IndicadorImpuesto, Temporada, TipoCargoAbono)
           VALUES
             (@idDoc, @numLinea, @esDocNuevo, @clave,
-             @cuentaMayor, @importe, @centroCosto, @textoLinea,
+             @cuentaMayor, @importe, @centroCosto, @nroAsignacion, @textoLinea,
              @indicadorImp, @temporada, @tipoCA);
         `);
 
-      // Credit lines (one per producer)
-      for (const prod of group.productores) {
+      // Credit lines (one per productor+especie, clave 29)
+      for (const linea of creditLines) {
         lineNum++;
         totalLineas++;
-        const oc = ocMap[prod.id_productor] || {};
+        const oc = ocMap[linea.id_productor] || {};
         await new sql.Request(transaction)
           .input('idDoc', sql.BigInt, idDoc)
           .input('numLinea', sql.Int, lineNum)
           .input('esDocNuevo', sql.Bit, 0)
           .input('clave', sql.NVarChar(10), '29')
-          .input('codProveedor', sql.NVarChar(20), prod.codigo_proveedor)
+          .input('codProveedor', sql.NVarChar(20), linea.codigo_proveedor)
           .input('indicadorCME', sql.NVarChar(5), 'A')
-          .input('importe', sql.Decimal(18, 2), Number(prod.monto_productor || 0))
+          .input('importe', sql.Decimal(18, 2), linea.monto)
           .input('ordenCompra', sql.NVarChar(30), oc.orden_compra || null)
           .input('posicionOC', sql.NVarChar(10), oc.posicion_oc || '10')
-          .input('nroAsignacion', sql.NVarChar(100), prod.especie_primaria || null)
-          .input('textoLinea', sql.NVarChar(100), textoLinea)
+          .input('nroAsignacion', sql.NVarChar(100), linea.especie)
+          .input('textoLinea', sql.NVarChar(100), docTextoCredito)
           .input('indicadorImp', sql.NVarChar(10), indicador_impuesto || 'C0')
           .input('temporada', sql.NVarChar(20), temporada || null)
           .input('tipoCA', sql.NVarChar(20), codigo_cargo_abono || null)
@@ -325,7 +496,13 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       `);
 
     await transaction.commit();
-    res.status(201).json({ data: { id_planilla_sap: idPlanilla, total_lineas: totalLineas, total_documentos: docNum } });
+
+    const response = {
+      data: { id_planilla_sap: idPlanilla, total_lineas: totalLineas, total_documentos: docNum },
+    };
+    if (warnings.length > 0) response.warnings = warnings;
+
+    res.status(201).json(response);
   } catch (err) {
     if (transaction) { try { await transaction.rollback(); } catch (_) {} }
     next(err);

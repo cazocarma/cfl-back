@@ -7,12 +7,13 @@ const {
   formatDateToIso,
   normalizeDestination,
   normalizeVbeln,
+  normalizeXblnr,
   inclusiveDateRangeDays,
   buildScopeKey,
   serializeJobParams,
   buildSourceSystem,
 } = require("./utils");
-const { extractByVbeln, extractByDateRange } = require("./sap-adapter-client");
+const { extractByVbeln, extractByXblnr, extractByDateRange } = require("./sap-adapter-client");
 const {
   failStaleJobs,
   insertQueuedJob,
@@ -40,6 +41,26 @@ function normalizeVbelnList(values) {
 
   for (const value of input) {
     const current = normalizeVbeln(value);
+    if (!current) {
+      return null;
+    }
+    if (unique.has(current)) {
+      continue;
+    }
+    unique.add(current);
+    normalized.push(current);
+  }
+
+  return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeXblnrList(values) {
+  const input = Array.isArray(values) ? values : [values];
+  const unique = new Set();
+  const normalized = [];
+
+  for (const value of input) {
+    const current = normalizeXblnr(value);
     if (!current) {
       return null;
     }
@@ -96,7 +117,9 @@ function accumulateBackendMetrics(target, summary) {
 }
 
 function buildUiRequestType(jobDefinition) {
-  return jobDefinition.job_type === JOB_TYPE.VBELN ? "vbeln" : "rango_fechas";
+  if (jobDefinition.job_type === JOB_TYPE.VBELN) return "vbeln";
+  if (jobDefinition.job_type === JOB_TYPE.XBLNR) return "xblnr";
+  return "rango_fechas";
 }
 
 function createBaseSnapshot(jobDefinition) {
@@ -115,11 +138,14 @@ function createBaseSnapshot(jobDefinition) {
     poll_interval_ms: JOB_POLL_INTERVAL_MS,
     parametros: {
       vbeln: jobDefinition.job_type === JOB_TYPE.VBELN ? [...jobDefinition.vbelns] : null,
+      xblnr: jobDefinition.job_type === JOB_TYPE.XBLNR ? [...jobDefinition.xblnrs] : null,
       fecha_desde: jobDefinition.fecha_desde || null,
       fecha_hasta: jobDefinition.fecha_hasta || null,
     },
     resumen: {
-      solicitados: jobDefinition.job_type === JOB_TYPE.VBELN ? jobDefinition.vbelns.length : 0,
+      solicitados:
+        jobDefinition.job_type === JOB_TYPE.VBELN ? jobDefinition.vbelns.length :
+        jobDefinition.job_type === JOB_TYPE.XBLNR ? jobDefinition.xblnrs.length : 0,
       procesados: 0,
       insertados_raw: 0,
       actualizados_canonicos: 0,
@@ -321,6 +347,35 @@ class CflSapLoadService {
     });
   }
 
+  async createXblnrJob({ sourceSystem, destination, xblnr, authnClaims }) {
+    const normalizedDestination = normalizeDestination(
+      normalizeRequestedSourceSystem(sourceSystem) || destination,
+      config.sapAdapter.defaultDestination
+    );
+    if (!normalizedDestination) {
+      throw buildDomainError("source_system invalido", 400);
+    }
+
+    const normalizedXblnrs = normalizeXblnrList(xblnr);
+    if (!normalizedXblnrs) {
+      throw buildDomainError("xblnr invalido. Debe enviar un arreglo con al menos un XBLNR valido", 400);
+    }
+
+    return this.enqueueJob({
+      job_type: JOB_TYPE.XBLNR,
+      destination: normalizedDestination,
+      vbelns: [],
+      xblnrs: normalizedXblnrs,
+      fecha_desde: null,
+      fecha_hasta: null,
+      requested_by: {
+        id_usuario: Number(authnClaims?.id_usuario || 0) || null,
+        username: authnClaims?.username || null,
+        role: authnClaims?.role || null,
+      },
+    });
+  }
+
   async createDateRangeJob({ sourceSystem, destination, fechaDesde, fechaHasta, authnClaims }) {
     const normalizedDestination = normalizeDestination(
       normalizeRequestedSourceSystem(sourceSystem) || destination,
@@ -443,6 +498,9 @@ class CflSapLoadService {
     if (jobDefinition.job_type === JOB_TYPE.VBELN) {
       return this.executeVbelnJob(jobDefinition, runningSnapshot);
     }
+    if (jobDefinition.job_type === JOB_TYPE.XBLNR) {
+      return this.executeXblnrJob(jobDefinition, runningSnapshot);
+    }
 
     return this.executeDateRangeJob(jobDefinition, runningSnapshot);
   }
@@ -527,6 +585,129 @@ class CflSapLoadService {
         touchSnapshot(snapshot, {
           etapa_actual: "procesando",
           mensaje: `Avance ${completedCount} de ${total} VBELN.`,
+          porcentaje_avance: Math.min(95, Math.max(10, Math.round((completedCount / total) * 95))),
+        })
+      );
+      await updateJobSnapshot(jobDefinition.job_id, JOB_STATUS.RUNNING, snapshot);
+    }
+
+    snapshot.estado = deriveFinalStatus(snapshot);
+    Object.assign(
+      snapshot,
+      touchSnapshot(snapshot, {
+        etapa_actual: "finalizado",
+        porcentaje_avance: 100,
+        finalizado_en: new Date().toISOString(),
+        mensaje: buildFinalMessage(snapshot),
+      })
+    );
+    return snapshot;
+  }
+
+  async executeXblnrJob(jobDefinition, runningSnapshot) {
+    const snapshot = cloneSnapshot(runningSnapshot);
+    const total = jobDefinition.xblnrs.length;
+
+    snapshot.resumen.solicitados = total;
+    snapshot.mensaje = `Procesando ${total} XBLNR solicitado(s).`;
+    snapshot.actualizado_en = new Date().toISOString();
+    await updateJobSnapshot(jobDefinition.job_id, JOB_STATUS.RUNNING, snapshot);
+
+    for (let index = 0; index < jobDefinition.xblnrs.length; index += 1) {
+      const xblnr = jobDefinition.xblnrs[index];
+      Object.assign(
+        snapshot,
+        touchSnapshot(snapshot, {
+          etapa_actual: "extrayendo",
+          mensaje: `Extrayendo XBLNR ${index + 1} de ${total}: ${xblnr}.`,
+          porcentaje_avance: Math.min(95, Math.max(5, Math.round((index / total) * 90))),
+        })
+      );
+      await updateJobSnapshot(jobDefinition.job_id, JOB_STATUS.RUNNING, snapshot);
+
+      try {
+        const extraction = await extractByXblnr(jobDefinition.destination, xblnr);
+
+        if ((extraction?.likp_rows || []).length === 0) {
+          snapshot.resumen.omitidos += 1;
+          snapshot.resultados.push({
+            vbeln: null,
+            sap_numero_entrega: xblnr,
+            estado: "OMITTED",
+            accion: "sin_datos",
+            detalle: "SAP no devolvio filas LIKP para el XBLNR solicitado.",
+            id_sap_entrega: null,
+            id_cabecera_flete: null,
+          });
+          snapshot.errores.push(
+            buildErrorItem({
+              code: "XBLNR_NO_DATA",
+              message: "SAP no devolvio datos para el XBLNR solicitado",
+              detail: `No se encontraron filas LIKP para ${xblnr}.`,
+              vbeln: xblnr,
+              stage: "extraccion",
+            })
+          );
+        } else {
+          Object.assign(
+            snapshot,
+            touchSnapshot(snapshot, {
+              etapa_actual: "persistiendo",
+              mensaje: `Persistiendo XBLNR ${index + 1} de ${total}: ${xblnr}.`,
+              porcentaje_avance: Math.min(
+                95,
+                Math.max(10, Math.round(((index + 0.5) / total) * 90))
+              ),
+            })
+          );
+          await updateJobSnapshot(jobDefinition.job_id, JOB_STATUS.RUNNING, snapshot);
+
+          const persisted = await persistExtraction(jobDefinition, extraction);
+          snapshot.resumen.procesados += 1;
+          snapshot.resumen.insertados_raw += sumRawInserted(persisted);
+          snapshot.resumen.actualizados_canonicos += sumCanonicalUpdated(persisted);
+          accumulateBackendMetrics(snapshot.backend_metrics, persisted);
+          snapshot.resultados.push({
+            vbeln: null,
+            sap_numero_entrega: xblnr,
+            estado: "COMPLETED",
+            accion: "sincronizado",
+            detalle: `raw insertado=${sumRawInserted(persisted)}, canonico actualizado=${sumCanonicalUpdated(persisted)}, filas extraidas=${Number(persisted?.totals?.filas_extraidas || 0)}`,
+            id_sap_entrega: null,
+            id_cabecera_flete: null,
+          });
+        }
+      } catch (error) {
+        snapshot.resumen.errores += 1;
+        snapshot.resultados.push({
+          vbeln: null,
+          sap_numero_entrega: xblnr,
+          estado: "FAILED",
+          accion: "error",
+          detalle: String(error?.message || "Fallo inesperado al procesar el XBLNR"),
+          id_sap_entrega: null,
+          id_cabecera_flete: null,
+        });
+        snapshot.errores.push(
+          buildErrorItem({
+            code: "XBLNR_PROCESSING_ERROR",
+            message: `Fallo el procesamiento del XBLNR ${xblnr}`,
+            detail: error.message,
+            vbeln: xblnr,
+            stage: snapshot.etapa_actual || "procesamiento",
+          })
+        );
+      }
+
+      const completedCount =
+        Number(snapshot.resumen.procesados || 0) +
+        Number(snapshot.resumen.omitidos || 0) +
+        Number(snapshot.resumen.errores || 0);
+      Object.assign(
+        snapshot,
+        touchSnapshot(snapshot, {
+          etapa_actual: "procesando",
+          mensaje: `Avance ${completedCount} de ${total} XBLNR.`,
           porcentaje_avance: Math.min(95, Math.max(10, Math.round((completedCount / total) * 95))),
         })
       );

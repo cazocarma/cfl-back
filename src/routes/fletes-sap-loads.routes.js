@@ -54,6 +54,45 @@ router.post("/vbeln", async (req, res, next) => {
   }
 });
 
+router.post("/xblnr", async (req, res, next) => {
+  if (
+    !(await ensurePermission(
+      req,
+      res,
+      ["fletes.sap.etl.ejecutar"],
+      "No tienes permisos para ejecutar cargas SAP"
+    ))
+  ) {
+    return;
+  }
+
+  req.auditContext = {
+    entity: "fletes.cargas-sap",
+    action: "ejecutar-xblnr",
+  };
+
+  try {
+    const body = req.body || {};
+    const job = await cflSapLoadService.createXblnrJob({
+      sourceSystem: body.source_system,
+      destination: body.destination,
+      xblnr: body.xblnr,
+      authnClaims: req.authnClaims,
+    });
+
+    res.status(202).json({ data: job });
+  } catch (error) {
+    if (error.statusCode === 409 && error.data) {
+      res.status(409).json({
+        error: error.message,
+        data: error.data,
+      });
+      return;
+    }
+    next(error);
+  }
+});
+
 router.post("/rango-fechas", async (req, res, next) => {
   if (
     !(await ensurePermission(

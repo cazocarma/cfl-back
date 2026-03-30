@@ -1,7 +1,8 @@
 const { z } = require('zod');
 
 const generarBody = z.object({
-  id_factura: z.coerce.number().int().positive(),
+  facturas_ids: z.array(z.coerce.number().int().positive()).min(1),
+  movimientos_ids: z.array(z.coerce.number().int().positive()).min(1),
   fecha_documento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   fecha_contabilizacion: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   glosa_cabecera: z.string().min(1).max(100),

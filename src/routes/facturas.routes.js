@@ -224,13 +224,59 @@ async function fetchFactura(pool, idFactura) {
     detallesPorFlete[d.IdCabeceraFlete].push(d);
   }
 
-  // Adjuntar detalles a cada movimiento
+  // Adjuntar detalles a cada movimiento, agrupando por material+especie
   const movimientos = movResult.recordset.map(m => ({
     ...m,
-    detalles: detallesPorFlete[m.IdCabeceraFlete] || [],
+    detalles: consolidarDetalles(detallesPorFlete[m.IdCabeceraFlete] || []),
   }));
 
   return { ...factura, movimientos };
+}
+
+/**
+ * Agrupa detalles por Material + Especie, sumando cantidades.
+ * Si un grupo no tiene especie pero otros sí, hereda la especie más frecuente.
+ */
+function consolidarDetalles(detalles) {
+  if (detalles.length <= 1) return detalles;
+
+  const groups = new Map();
+  for (const d of detalles) {
+    const mat = (d.Material || d.Descripcion || '').trim();
+    const esp = (d.especie_glosa || '').trim();
+    const key = `${mat}|${esp}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        ...d,
+        Cantidad: Number(d.Cantidad) || 0,
+        _count: 1,
+      });
+    } else {
+      const g = groups.get(key);
+      g.Cantidad += Number(d.Cantidad) || 0;
+      g._count++;
+    }
+  }
+
+  // Si hay grupos sin especie, asignar la especie más frecuente del mismo flete
+  const especieCounts = {};
+  for (const g of groups.values()) {
+    const esp = (g.especie_glosa || '').trim();
+    if (esp) especieCounts[esp] = (especieCounts[esp] || 0) + g._count;
+  }
+  const especieMasFrecuente = Object.entries(especieCounts)
+    .sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  const result = [];
+  for (const g of groups.values()) {
+    if (!g.especie_glosa && especieMasFrecuente) {
+      g.especie_glosa = especieMasFrecuente;
+    }
+    delete g._count;
+    result.push(g);
+  }
+  return result;
 }
 
 // ===========================================================================
