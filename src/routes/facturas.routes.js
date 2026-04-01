@@ -157,6 +157,7 @@ async function fetchFactura(pool, idFactura) {
         cf.NumeroEntrega,
         cf.GuiaRemision,
         cf.TipoMovimiento,
+        cf.SentidoFlete,
         cf.estado,
         cf.FechaSalida,
         cf.MontoAplicado,
@@ -166,11 +167,11 @@ async function fetchFactura(pool, idFactura) {
         cf.IdCentroCosto,
         centro_costo       = cc.nombre,
         centro_costo_codigo = cc.SapCodigo,
-        ruta = COALESCE(r.NombreRuta,
-          CASE WHEN no.nombre IS NOT NULL OR nd.nombre IS NOT NULL
-            THEN CONCAT(COALESCE(no.nombre,'Origen'), ' -> ', COALESCE(nd.nombre,'Destino'))
-            ELSE NULL END
-        ),
+        ruta_nombre        = r.NombreRuta,
+        origen_nombre      = no.nombre,
+        destino_nombre     = nd.nombre,
+        cuenta_mayor_codigo = cm.Codigo,
+        cuenta_mayor_nombre = cm.Glosa,
         empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), NULL),
         empresa_rut    = emp.Rut,
         chofer_nombre  = ch.SapNombre,
@@ -184,6 +185,7 @@ async function fetchFactura(pool, idFactura) {
       FROM [cfl].[CabeceraFlete] cf
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
       LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
       LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer

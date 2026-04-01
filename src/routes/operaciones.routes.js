@@ -219,6 +219,7 @@ router.get("/planillas-sap/overview", async (req, res, next) => {
           monto_total: facturas.reduce((acc, row) => acc + toNumber(row.monto_total, 0), 0),
         },
         grupos,
+        facturas,
       },
       permissions: buildPermissions(authzContext),
       generated_at: new Date().toISOString(),

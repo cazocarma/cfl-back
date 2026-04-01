@@ -18,11 +18,15 @@ const generarBody = z.object({
 });
 
 const cambiarEstadoBody = z.object({
-  estado: z.enum(['descargada', 'contabilizada']),
+  estado: z.enum(['enviada', 'anulada']),
 });
 
 const idParam = z.object({
   id: z.coerce.number().int().positive(),
 });
 
-module.exports = { generarBody, cambiarEstadoBody, idParam };
+const agregarFacturasBody = z.object({
+  facturas_ids: z.array(z.coerce.number().int().positive()).min(1),
+});
+
+module.exports = { generarBody, cambiarEstadoBody, idParam, agregarFacturasBody };

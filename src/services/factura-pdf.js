@@ -21,13 +21,6 @@ function formatDate(d) {
   return d ? new Date(d).toLocaleDateString('es-CL') : '-';
 }
 
-function tipoMovLabel(tm) {
-  const v = String(tm || '').trim().toLowerCase();
-  if (v === 'push') return 'Despacho';
-  if (v === 'pull') return 'Retorno';
-  return tm || '-';
-}
-
 // ── Layout constants ────────────────────────────────────────────────────────
 
 const PAGE_W = 792;   // Letter landscape
@@ -40,26 +33,25 @@ const TABLE_BOTTOM = FOOTER_Y - 10;
 const HEADER_BAR_H = 50;
 const TABLE_HEADER_H = 15;
 const FONT_SIZE = 6.2;
-const DETAIL_FONT_SIZE = 5.5;
-const DETAIL_ROW_H = 7;
 const CELL_PAD = 2;
 
 // ── Column definitions ──────────────────────────────────────────────────────
 
 function buildColumns() {
   const defs = [
-    { label: 'Fecha',       w: 46, align: 'left'  },
-    { label: 'Tipo Mov.',   w: 46, align: 'left'  },
-    { label: 'N° Guía',     w: 52, align: 'left'  },
-    { label: 'Tipo Cam.',   w: 50, align: 'left'  },
-    { label: 'Patente',     w: 46, align: 'left'  },
-    { label: 'Chofer',      w: 72, align: 'left'  },
-    { label: 'Ruta',        w: 100, align: 'left' },
-    { label: 'Det. Viaje',  w: 62, align: 'left'  },
-    { label: 'Productor',   w: 72, align: 'left'  },
+    { label: 'Fecha',       w: 44, align: 'left'  },
+    { label: 'Guía Ida',    w: 48, align: 'left'  },
+    { label: 'Guía Ret.',   w: 48, align: 'left'  },
+    { label: 'Tipo Cam.',   w: 46, align: 'left'  },
+    { label: 'Patente',     w: 44, align: 'left'  },
+    { label: 'Chofer',      w: 68, align: 'left'  },
+    { label: 'Ruta',        w: 90, align: 'left'  },
+    { label: 'Especie',     w: 50, align: 'left'  },
+    { label: 'Det. Viaje',  w: 56, align: 'left'  },
+    { label: 'Productor',   w: 66, align: 'left'  },
     { label: 'C. Costo',    w: 46, align: 'left'  },
-    { label: 'Tipo Flete',  w: 58, align: 'left'  },
-    { label: 'Valor',       w: 58, align: 'right' },
+    { label: 'Cta. Mayor',  w: 52, align: 'left'  },
+    { label: 'Valor',       w: 54, align: 'right' },
   ];
 
   const totalW = defs.reduce((s, c) => s + c.w, 0);
@@ -73,6 +65,42 @@ function buildColumns() {
   for (const c of defs) { c.x = x; x += c.w; }
 
   return defs;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Construye texto de ruta, invirtiendo si sentido es VUELTA. */
+function buildRutaText(m) {
+  const sentido = (m.SentidoFlete || '').toUpperCase();
+  const isVuelta = sentido === 'VUELTA';
+
+  if (m.ruta_nombre) {
+    // Named route — still invert the display if VUELTA
+    if (isVuelta && m.origen_nombre && m.destino_nombre) {
+      return `${m.destino_nombre} -> ${m.origen_nombre}`;
+    }
+    return m.ruta_nombre;
+  }
+  if (m.origen_nombre || m.destino_nombre) {
+    const orig = m.origen_nombre || 'Origen';
+    const dest = m.destino_nombre || 'Destino';
+    return isVuelta ? `${dest} -> ${orig}` : `${orig} -> ${dest}`;
+  }
+  return '-';
+}
+
+/** Extrae la especie principal (más frecuente) de los detalles de un movimiento. */
+function especiePrincipal(detalles) {
+  if (!detalles || detalles.length === 0) return '-';
+  const counts = {};
+  for (const d of detalles) {
+    const esp = (d.especie_glosa || '').trim();
+    if (esp) counts[esp] = (counts[esp] || 0) + 1;
+  }
+  const entries = Object.entries(counts);
+  if (entries.length === 0) return '-';
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries[0][0];
 }
 
 // ── PDF rendering ───────────────────────────────────────────────────────────
@@ -158,36 +186,39 @@ function generatePreFacturaPdf(factura, outputStream) {
 
   let tableY = drawTableHeader(infoY);
   let rowIdx = 0;
-  const detailIndent = Math.round(CONTENT_W * 0.25);
 
   for (const m of factura.movimientos) {
-    const detalles = m.detalles || [];
-
     const choferRut = m.chofer_rut || '';
     const choferNombre = m.chofer_nombre || '-';
-    const prodCodigo = m.productor_codigo || '';
     const prodNombre = m.productor_nombre || '-';
-    const rutaText = m.ruta || '-';
+    const rutaText = buildRutaText(m);
     const ccText = `${m.centro_costo_codigo || '-'}\n${m.centro_costo || ''}`.trim();
+    const cmText = `${m.cuenta_mayor_codigo || '-'}\n${m.cuenta_mayor_nombre || ''}`.trim();
+    const especieText = especiePrincipal(m.detalles);
+
+    // Guía Ida / Retorno based on TipoMovimiento
+    const guia = m.GuiaRemision || m.NumeroEntrega || m.SapNumeroEntrega || '-';
+    const tipoMov = String(m.TipoMovimiento || '').trim().toLowerCase();
+    const guiaIda = tipoMov === 'push' ? String(guia) : '';
+    const guiaRetorno = tipoMov === 'pull' ? String(guia) : '';
 
     // Dynamic row height
     const wrapCells = [
       { text: rutaText, w: cols[6].w },
       { text: `${choferRut}\n${choferNombre}`, w: cols[5].w },
-      { text: `${prodCodigo}\n${prodNombre}`, w: cols[8].w },
-      { text: m.detalle_viaje || '-', w: cols[7].w },
-      { text: ccText, w: cols[9].w },
+      { text: prodNombre, w: cols[9].w },
+      { text: m.detalle_viaje || '-', w: cols[8].w },
+      { text: ccText, w: cols[10].w },
+      { text: cmText, w: cols[11].w },
     ];
     let maxCellH = 12;
     for (const ct of wrapCells) {
       const h = measureCellH(ct.text, ct.w);
       if (h > maxCellH) maxCellH = h;
     }
-    const mainRowH = maxCellH + 6;
-    const detailBlockH = detalles.length > 0 ? (detalles.length * DETAIL_ROW_H + 14) : 0;
-    const rowH = mainRowH + detailBlockH;
+    const rowH = maxCellH + 6;
 
-    // Page break if needed — only creates new page if there's actual content to draw
+    // Page break if needed
     tableY = ensureSpace(tableY, rowH);
 
     // Alternating row background + separator
@@ -197,14 +228,13 @@ function generatePreFacturaPdf(factura, outputStream) {
     doc.moveTo(MARGIN_L, tableY).lineTo(PAGE_W - MARGIN_R, tableY)
       .lineWidth(0.3).strokeColor('#e0e0e0').stroke();
 
-    const guia = m.GuiaRemision || m.NumeroEntrega || m.SapNumeroEntrega || '-';
     const ly = tableY + 3;
 
     // Main cells
     doc.font('Helvetica').fontSize(FONT_SIZE).fillColor('#1a1a1a');
     doc.text(formatDate(m.FechaSalida), cols[0].x + CELL_PAD, ly, { width: cols[0].w - CELL_PAD * 2 });
-    doc.text(tipoMovLabel(m.TipoMovimiento), cols[1].x + CELL_PAD, ly, { width: cols[1].w - CELL_PAD * 2 });
-    doc.text(String(guia), cols[2].x + CELL_PAD, ly, { width: cols[2].w - CELL_PAD * 2 });
+    doc.text(guiaIda, cols[1].x + CELL_PAD, ly, { width: cols[1].w - CELL_PAD * 2 });
+    doc.text(guiaRetorno, cols[2].x + CELL_PAD, ly, { width: cols[2].w - CELL_PAD * 2 });
     doc.text(String(m.tipo_camion || '-'), cols[3].x + CELL_PAD, ly, { width: cols[3].w - CELL_PAD * 2 });
     doc.text(String(m.camion_patente || '-'), cols[4].x + CELL_PAD, ly, { width: cols[4].w - CELL_PAD * 2 });
 
@@ -217,47 +247,25 @@ function generatePreFacturaPdf(factura, outputStream) {
     // Ruta
     doc.text(rutaText, cols[6].x + CELL_PAD, ly, { width: cols[6].w - CELL_PAD * 2 });
 
+    // Especie
+    doc.text(especieText, cols[7].x + CELL_PAD, ly, { width: cols[7].w - CELL_PAD * 2 });
+
     // Detalle viaje
-    doc.text(String(m.detalle_viaje || '-'), cols[7].x + CELL_PAD, ly, { width: cols[7].w - CELL_PAD * 2 });
+    doc.text(String(m.detalle_viaje || '-'), cols[8].x + CELL_PAD, ly, { width: cols[8].w - CELL_PAD * 2 });
 
     // Productor
-    doc.font('Helvetica-Bold').fontSize(FONT_SIZE).fillColor('#1a1a1a');
-    doc.text(prodCodigo || '-', cols[8].x + CELL_PAD, ly, { width: cols[8].w - CELL_PAD * 2, lineBreak: false });
-    doc.font('Helvetica').fontSize(FONT_SIZE);
-    doc.text(prodNombre, cols[8].x + CELL_PAD, ly + 8, { width: cols[8].w - CELL_PAD * 2 });
+    doc.font('Helvetica').fontSize(FONT_SIZE).fillColor('#1a1a1a');
+    doc.text(prodNombre, cols[9].x + CELL_PAD, ly, { width: cols[9].w - CELL_PAD * 2 });
 
     // Centro costo
-    doc.text(ccText, cols[9].x + CELL_PAD, ly, { width: cols[9].w - CELL_PAD * 2 });
+    doc.text(ccText, cols[10].x + CELL_PAD, ly, { width: cols[10].w - CELL_PAD * 2 });
 
-    // Tipo flete
-    doc.text(String(m.tipo_flete_nombre || '-'), cols[10].x + CELL_PAD, ly, { width: cols[10].w - CELL_PAD * 2 });
+    // Cuenta mayor
+    doc.text(cmText, cols[11].x + CELL_PAD, ly, { width: cols[11].w - CELL_PAD * 2 });
 
     // Valor
     doc.font('Helvetica-Bold').fontSize(FONT_SIZE).fillColor('#1a1a1a');
-    doc.text(formatCLP(m.MontoAplicado), cols[11].x + CELL_PAD, ly, { width: cols[11].w - CELL_PAD * 2, align: 'right' });
-
-    // Detail sub-rows
-    if (detalles.length > 0) {
-      const detStartY = tableY + mainRowH;
-      const detailX = MARGIN_L + detailIndent;
-      const detailW = CONTENT_W - detailIndent - 10;
-
-      doc.font('Helvetica-Bold').fontSize(DETAIL_FONT_SIZE).fillColor(BRAND_COLOR);
-      doc.text('Material', detailX, detStartY, { width: detailW * 0.30, lineBreak: false });
-      doc.text('Descripcion', detailX + detailW * 0.30, detStartY, { width: detailW * 0.30, lineBreak: false });
-      doc.text('Especie', detailX + detailW * 0.60, detStartY, { width: detailW * 0.25, lineBreak: false });
-      doc.text('Cantidad', detailX + detailW * 0.85, detStartY, { width: detailW * 0.15, align: 'right', lineBreak: false });
-
-      doc.font('Helvetica').fontSize(DETAIL_FONT_SIZE).fillColor('#444444');
-      let subY = detStartY + DETAIL_ROW_H;
-      for (const det of detalles) {
-        doc.text(det.Material || '-', detailX, subY, { width: detailW * 0.30, lineBreak: false });
-        doc.text(det.Descripcion || '-', detailX + detailW * 0.30, subY, { width: detailW * 0.30, lineBreak: false });
-        doc.text(det.especie_glosa || '-', detailX + detailW * 0.60, subY, { width: detailW * 0.25, lineBreak: false });
-        doc.text(det.Cantidad != null ? String(det.Cantidad) : '-', detailX + detailW * 0.85, subY, { width: detailW * 0.15, align: 'right', lineBreak: false });
-        subY += DETAIL_ROW_H;
-      }
-    }
+    doc.text(formatCLP(m.MontoAplicado), cols[12].x + CELL_PAD, ly, { width: cols[12].w - CELL_PAD * 2, align: 'right' });
 
     doc.fillColor('#000000');
     tableY += rowH;

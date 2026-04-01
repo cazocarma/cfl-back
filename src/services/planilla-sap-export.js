@@ -125,6 +125,8 @@ function generateSapExcel(planilla) {
       : glosa;
 
     for (const linea of doc.lineas || []) {
+      if (Number(linea.importe) === 0) continue;
+
       const isDebit  = linea.clave_contabilizacion === '50';
       const isHeader = !!linea.es_doc_nuevo;
 
