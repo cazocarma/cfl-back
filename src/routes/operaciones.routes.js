@@ -1,7 +1,8 @@
 const express = require("express");
 const { getPool } = require("../db");
 const { clamp, parsePositiveInt } = require("../utils/parse");
-const { hasAnyPermission, resolveAuthzContext } = require("../authz");
+const { hasAnyPermission, isAdmin } = require("../authz");
+const { requirePermission } = require("../middleware/authz.middleware");
 
 const router = express.Router();
 
@@ -35,42 +36,19 @@ function uniqueBy(rows, keyName) {
   return output;
 }
 
-const OPERACIONES_READ_PERMISSIONS = [
-  "operaciones.ver",
-  "facturas.ver",
-  "facturas.editar",
-  "facturas.conciliar",
-  "planillas.ver",
-  "planillas.generar",
-];
-
-function isAdmin(authzContext) {
-  return String(authzContext?.primaryRole || "").toLowerCase() === "administrador";
-}
-
-function ensureCanReadOperaciones(authzContext, res) {
-  if (isAdmin(authzContext) || hasAnyPermission(authzContext, OPERACIONES_READ_PERMISSIONS)) {
-    return true;
-  }
-  res.status(403).json({ error: "No tienes permisos para consultar operaciones" });
-  return false;
-}
-
 function buildPermissions(authzContext) {
+  const admin = isAdmin(authzContext);
   return {
     can_edit_facturas:
-      hasAnyPermission(authzContext, ["facturas.editar", "facturas.conciliar"]) ||
-      isAdmin(authzContext),
+      hasAnyPermission(authzContext, ["facturas.editar", "facturas.conciliar"]) || admin,
     can_generate_planillas:
-      hasAnyPermission(authzContext, ["planillas.generar"]) ||
-      isAdmin(authzContext),
+      hasAnyPermission(authzContext, ["planillas.generar"]) || admin,
   };
 }
 
-router.get("/facturas/overview", async (req, res, next) => {
+router.get("/facturas/overview", requirePermission("reportes.view", "facturas.ver", "facturas.editar", "facturas.conciliar", "planillas.ver", "planillas.generar"), async (req, res, next) => {
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!ensureCanReadOperaciones(authzContext, res)) return;
+    const authzContext = req.authzContext;
     const pool = await getPool();
 
     const summaryResult = await pool.request().query(`
@@ -128,10 +106,9 @@ router.get("/facturas/overview", async (req, res, next) => {
   }
 });
 
-router.get("/planillas-sap/overview", async (req, res, next) => {
+router.get("/planillas-sap/overview", requirePermission("reportes.view", "facturas.ver", "facturas.editar", "facturas.conciliar", "planillas.ver", "planillas.generar"), async (req, res, next) => {
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!ensureCanReadOperaciones(authzContext, res)) return;
+    const authzContext = req.authzContext;
     const pool = await getPool();
 
     // Facturas recibidas sin planilla generada
@@ -229,10 +206,8 @@ router.get("/planillas-sap/overview", async (req, res, next) => {
   }
 });
 
-router.get("/estadisticas/overview", async (req, res, next) => {
+router.get("/estadisticas/overview", requirePermission("reportes.view", "facturas.ver", "facturas.editar", "facturas.conciliar", "planillas.ver", "planillas.generar"), async (req, res, next) => {
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!ensureCanReadOperaciones(authzContext, res)) return;
     const pool = await getPool();
 
     // KPIs globales
@@ -383,12 +358,183 @@ router.get("/estadisticas/overview", async (req, res, next) => {
   }
 });
 
-router.get("/auditoria/overview", async (req, res, next) => {
+// ---------------------------------------------------------------------------
+// GET /estadisticas/viajes — viajes por chofer, transportista, periodo, temporada
+// ---------------------------------------------------------------------------
+router.get("/estadisticas/viajes", requirePermission("reportes.view", "facturas.ver", "facturas.editar", "facturas.conciliar", "planillas.ver", "planillas.generar"), async (req, res, next) => {
+  try {
+    const pool = await getPool();
+    const request = pool.request();
+
+    const whereClauses = ["cf.Estado NOT IN ('ANULADO')"];
+
+    const temporadaId = parsePositiveInt(req.query.temporada_id, 0);
+    if (temporadaId) {
+      request.input("temporadaId", temporadaId);
+      whereClauses.push("tp.IdTemporada = @temporadaId");
+    }
+    const empresaId = parsePositiveInt(req.query.empresa_id, 0);
+    if (empresaId) {
+      request.input("empresaId", empresaId);
+      whereClauses.push("et.IdEmpresa = @empresaId");
+    }
+    if (req.query.fecha_desde) {
+      request.input("fechaDesde", String(req.query.fecha_desde));
+      whereClauses.push("cf.FechaSalida >= CAST(@fechaDesde AS DATE)");
+    }
+    if (req.query.fecha_hasta) {
+      request.input("fechaHasta", String(req.query.fecha_hasta));
+      whereClauses.push("cf.FechaSalida <= CAST(@fechaHasta AS DATE)");
+    }
+
+    const result = await request.query(`
+      SELECT
+        ch.IdChofer,
+        ch.SapIdFiscal AS chofer_rut,
+        ch.SapNombre AS chofer_nombre,
+        et.IdEmpresa,
+        et.RazonSocial AS empresa_nombre,
+        et.Rut AS empresa_rut,
+        tp.IdTemporada,
+        tp.Codigo AS temporada_codigo,
+        tp.Nombre AS temporada_nombre,
+        periodo = FORMAT(cf.FechaSalida, 'yyyy-MM'),
+        total_viajes = COUNT(*),
+        monto_total = SUM(cf.MontoAplicado + ISNULL(cf.MontoExtra, 0))
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+      LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
+      LEFT JOIN [cfl].[EmpresaTransporte] et ON et.IdEmpresa = mv.IdEmpresaTransporte
+      LEFT JOIN [cfl].[Temporada] tp
+        ON cf.FechaSalida >= tp.FechaInicio AND cf.FechaSalida <= tp.FechaFin
+      WHERE ${whereClauses.join(" AND ")}
+      GROUP BY
+        ch.IdChofer, ch.SapIdFiscal, ch.SapNombre,
+        et.IdEmpresa, et.RazonSocial, et.Rut,
+        tp.IdTemporada, tp.Codigo, tp.Nombre,
+        FORMAT(cf.FechaSalida, 'yyyy-MM')
+      ORDER BY et.RazonSocial, ch.SapNombre, FORMAT(cf.FechaSalida, 'yyyy-MM') DESC;
+    `);
+
+    res.json({ data: result.recordset });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /estadisticas/viajes/export — Excel export
+// ---------------------------------------------------------------------------
+router.get("/estadisticas/viajes/export", requirePermission("reportes.view", "facturas.ver", "facturas.editar", "facturas.conciliar", "planillas.ver", "planillas.generar"), async (req, res, next) => {
+  try {
+    const pool = await getPool();
+    const request = pool.request();
+
+    const whereClauses = ["cf.Estado NOT IN ('ANULADO')"];
+
+    const temporadaId = parsePositiveInt(req.query.temporada_id, 0);
+    if (temporadaId) {
+      request.input("temporadaId", temporadaId);
+      whereClauses.push("tp.IdTemporada = @temporadaId");
+    }
+    const empresaId = parsePositiveInt(req.query.empresa_id, 0);
+    if (empresaId) {
+      request.input("empresaId", empresaId);
+      whereClauses.push("et.IdEmpresa = @empresaId");
+    }
+    if (req.query.fecha_desde) {
+      request.input("fechaDesde", String(req.query.fecha_desde));
+      whereClauses.push("cf.FechaSalida >= CAST(@fechaDesde AS DATE)");
+    }
+    if (req.query.fecha_hasta) {
+      request.input("fechaHasta", String(req.query.fecha_hasta));
+      whereClauses.push("cf.FechaSalida <= CAST(@fechaHasta AS DATE)");
+    }
+
+    const result = await request.query(`
+      SELECT
+        et.RazonSocial AS empresa_nombre,
+        et.Rut AS empresa_rut,
+        ch.SapNombre AS chofer_nombre,
+        ch.SapIdFiscal AS chofer_rut,
+        tp.Codigo AS temporada_codigo,
+        periodo = FORMAT(cf.FechaSalida, 'yyyy-MM'),
+        total_viajes = COUNT(*),
+        monto_total = SUM(cf.MontoAplicado + ISNULL(cf.MontoExtra, 0))
+      FROM [cfl].[CabeceraFlete] cf
+      LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
+      LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
+      LEFT JOIN [cfl].[EmpresaTransporte] et ON et.IdEmpresa = mv.IdEmpresaTransporte
+      LEFT JOIN [cfl].[Temporada] tp
+        ON cf.FechaSalida >= tp.FechaInicio AND cf.FechaSalida <= tp.FechaFin
+      WHERE ${whereClauses.join(" AND ")}
+      GROUP BY
+        et.RazonSocial, et.Rut,
+        ch.SapNombre, ch.SapIdFiscal,
+        tp.Codigo,
+        FORMAT(cf.FechaSalida, 'yyyy-MM')
+      ORDER BY et.RazonSocial, ch.SapNombre, FORMAT(cf.FechaSalida, 'yyyy-MM') DESC;
+    `);
+
+    const ExcelJS = require("exceljs");
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet("Viajes");
+
+    const columns = [
+      { header: "Empresa", key: "empresa_nombre", width: 35 },
+      { header: "RUT Empresa", key: "empresa_rut", width: 15 },
+      { header: "Chofer", key: "chofer_nombre", width: 30 },
+      { header: "RUT Chofer", key: "chofer_rut", width: 15 },
+      { header: "Temporada", key: "temporada_codigo", width: 12 },
+      { header: "Periodo", key: "periodo", width: 10 },
+      { header: "Viajes", key: "total_viajes", width: 10 },
+      { header: "Monto Total", key: "monto_total", width: 15 },
+    ];
+
+    sheet.columns = columns;
+
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true, size: 9 };
+    headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8F0FE" } };
+    headerRow.alignment = { vertical: "middle" };
+
+    for (const row of result.recordset) {
+      sheet.addRow({
+        empresa_nombre: row.empresa_nombre || "Sin asignar",
+        empresa_rut: row.empresa_rut || "",
+        chofer_nombre: row.chofer_nombre || "Sin asignar",
+        chofer_rut: row.chofer_rut || "",
+        temporada_codigo: row.temporada_codigo || "-",
+        periodo: row.periodo || "-",
+        total_viajes: Number(row.total_viajes || 0),
+        monto_total: Number(row.monto_total || 0),
+      });
+    }
+
+    // Totals row
+    const totalViajes = result.recordset.reduce((s, r) => s + Number(r.total_viajes || 0), 0);
+    const totalMonto = result.recordset.reduce((s, r) => s + Number(r.monto_total || 0), 0);
+    const totalsRow = sheet.addRow({
+      empresa_nombre: "TOTAL",
+      total_viajes: totalViajes,
+      monto_total: totalMonto,
+    });
+    totalsRow.font = { bold: true, size: 9 };
+
+    const fecha = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename=estadisticas-viajes-${fecha}.xlsx`);
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/auditoria/overview", requirePermission("reportes.view", "facturas.ver", "facturas.editar", "facturas.conciliar", "planillas.ver", "planillas.generar"), async (req, res, next) => {
   const limit = clamp(parsePositiveInt(req.query.limit, 80), 10, 200);
 
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!ensureCanReadOperaciones(authzContext, res)) return;
     const pool = await getPool();
 
     const summaryResult = await pool.request().query(`

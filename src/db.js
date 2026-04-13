@@ -31,7 +31,22 @@ function augmentRowKeys(row) {
   }
 
   for (const key of Object.keys(row)) {
-    const value = row[key];
+    let value = row[key];
+
+    // Columnas DATE (UTC midnight) → string "YYYY-MM-DD" sin timezone.
+    // Evita que JSON.stringify agregue "T00:00:00.000Z" y el browser
+    // interprete la fecha en zona horaria local (desplazando 1 día en Chile).
+    if (
+      value instanceof Date &&
+      !isNaN(value.getTime()) &&
+      value.getUTCHours() === 0 &&
+      value.getUTCMinutes() === 0 &&
+      value.getUTCSeconds() === 0 &&
+      value.getUTCMilliseconds() === 0
+    ) {
+      value = value.toISOString().slice(0, 10);
+      row[key] = value;
+    }
 
     const snake = toSnakeCaseKey(key);
     if (snake && !(snake in row)) {

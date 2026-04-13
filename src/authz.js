@@ -1,5 +1,7 @@
 const { getPool } = require("./db");
 
+const ADMIN_ROLE = "administrador";
+
 const CACHE_TTL_MS = 30 * 1000;
 const MAX_CACHE_SIZE = 500;
 const cache = new Map();
@@ -207,8 +209,14 @@ function hasAnyPermission(authzContext, permissionKeys) {
   return false;
 }
 
+function isAdmin(authzContext) {
+  return String(authzContext?.primaryRole || "").toLowerCase() === ADMIN_ROLE;
+}
+
 module.exports = {
+  ADMIN_ROLE,
   resolveAuthzContext,
   hasPermission,
   hasAnyPermission,
+  isAdmin,
 };

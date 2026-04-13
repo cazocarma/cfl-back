@@ -1,4 +1,4 @@
-const { resolveAuthzContext, hasAnyPermission } = require("../authz");
+const { resolveAuthzContext, hasAnyPermission, isAdmin } = require("../authz");
 
 /**
  * Middleware factory que resuelve el contexto de autorizacion y verifica permisos.
@@ -18,8 +18,7 @@ function requirePermission(...requiredPermissions) {
         return next();
       }
 
-      const isAdmin = String(authzContext?.primaryRole || "").toLowerCase() === "administrador";
-      if (isAdmin) {
+      if (isAdmin(authzContext)) {
         return next();
       }
 

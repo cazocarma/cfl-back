@@ -16,6 +16,7 @@ const {
   resolveImputacionFlete,
 } = require("../helpers");
 const { validate } = require("../middleware/validate.middleware");
+const { requirePermission } = require("../middleware/authz.middleware");
 const { fleteManualBody, fleteIdParam } = require("../schemas/fletes.schemas");
 const { logger } = require("../logger");
 
@@ -39,6 +40,7 @@ function parseFleteInput(cabeceraIn) {
     idProductor: parseOptionalBigInt(cabeceraIn.id_productor),
     idTarifa: parseOptionalBigInt(cabeceraIn.id_tarifa),
     sentidoFlete: toNullableTrimmedString(cabeceraIn.sentido_flete),
+    idEspecie: parseOptionalBigInt(cabeceraIn.id_especie),
   };
 }
 
@@ -278,7 +280,7 @@ async function fetchDetalles(pool, idCabecera) {
   return result.recordset;
 }
 
-router.get("/:id_cabecera_flete", validate({ params: fleteIdParam }), async (req, res, next) => {
+router.get("/:id_cabecera_flete", requirePermission("fletes.candidatos.view", "fletes.editar"), validate({ params: fleteIdParam }), async (req, res, next) => {
   const idCabecera = req.params.id_cabecera_flete;
 
   try {
@@ -296,7 +298,7 @@ router.get("/:id_cabecera_flete", validate({ params: fleteIdParam }), async (req
   }
 });
 
-router.post("/manual", validate({ body: fleteManualBody }), async (req, res, next) => {
+router.post("/manual", requirePermission("fletes.crear"), validate({ body: fleteManualBody }), async (req, res, next) => {
   const { cabecera: cabeceraIn, detalles: detallesIn } = req.body;
   const parsed = parseFleteInput(cabeceraIn);
   if (!validateFleteInput(parsed, res)) return;
@@ -360,6 +362,7 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
     insertCabeceraReq.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("updatedAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("idCentroCosto", sql.BigInt, idCentroCosto);
+    insertCabeceraReq.input("idEspecieCab", sql.BigInt, parsed.idEspecie);
 
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
@@ -387,7 +390,8 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
         [FechaActualizacion],
         [IdCuentaMayor],
         [IdImputacionFlete],
-        [IdCentroCosto]
+        [IdCentroCosto],
+        [IdEspecie]
       )
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
@@ -415,7 +419,8 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
         @updatedAt,
         @idCuentaMayor,
         @idImputacionFlete,
-        @idCentroCosto
+        @idCentroCosto,
+        @idEspecieCab
       );
     `);
 
@@ -437,7 +442,7 @@ router.post("/manual", validate({ body: fleteManualBody }), async (req, res, nex
   }
 });
 
-router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteManualBody }), async (req, res, next) => {
+router.put("/:id_cabecera_flete", requirePermission("fletes.editar"), validate({ params: fleteIdParam, body: fleteManualBody }), async (req, res, next) => {
   const idCabecera = req.params.id_cabecera_flete;
   const { cabecera: cabeceraIn, detalles: detallesIn } = req.body;
   const parsed = parseFleteInput(cabeceraIn);
@@ -524,6 +529,7 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
       .input("idProductor", sql.BigInt, idProductor)
       .input("sentidoFlete", sql.VarChar(20), sentidoFlete ? sentidoFlete.slice(0, 20) : null)
       .input("idCentroCosto", sql.BigInt, idCentroCosto)
+      .input("idEspecieCab", sql.BigInt, parsed.idEspecie ?? existing.IdEspecie ?? null)
       .input("updatedAt", sql.DateTime2(0), now)
       .query(`
         UPDATE [cfl].[CabeceraFlete]
@@ -546,6 +552,7 @@ router.put("/:id_cabecera_flete", validate({ params: fleteIdParam, body: fleteMa
           IdProductor = @idProductor,
           SentidoFlete = @sentidoFlete,
           IdCentroCosto = @idCentroCosto,
+          IdEspecie = @idEspecieCab,
           FechaActualizacion = @updatedAt
         WHERE IdCabeceraFlete = @idCabecera;
       `);

@@ -2,7 +2,7 @@
 
 const express = require('express');
 const { getPool, sql } = require('../db');
-const { resolveAuthzContext, hasAnyPermission } = require('../authz');
+const { requirePermission } = require('../middleware/authz.middleware');
 const { parsePositiveInt } = require('../utils/parse');
 const { validate } = require('../middleware/validate.middleware');
 const { generarBody, cambiarEstadoBody, idParam, agregarFacturasBody } = require('../schemas/planillas-sap.schemas');
@@ -16,13 +16,6 @@ const MESES = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function checkPlanillasPerm(req) {
-  const authzContext = await resolveAuthzContext(req);
-  const isAdmin = String(authzContext?.primaryRole || '').toLowerCase() === 'administrador';
-  const hasPerm = hasAnyPermission(authzContext, ['planillas.generar', 'facturacion']);
-  return { authzContext, allowed: isAdmin || hasPerm };
-}
 
 async function fetchPlanilla(pool, idPlanilla) {
   const hdr = await pool.request()
@@ -344,7 +337,7 @@ async function regenerateDocuments(transaction, idPlanilla) {
 // ---------------------------------------------------------------------------
 // GET /planillas-sap — list
 // ---------------------------------------------------------------------------
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
   try {
     const pool = await getPool();
     const result = await pool.request().query(`
@@ -388,7 +381,7 @@ router.get('/', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /planillas-sap/movimientos — movements for planilla generation
 // ---------------------------------------------------------------------------
-router.get('/movimientos', async (req, res, next) => {
+router.get('/movimientos', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
   const raw = req.query.facturas_ids;
   if (!raw) { res.status(400).json({ error: 'facturas_ids requerido' }); return; }
 
@@ -442,9 +435,101 @@ router.get('/movimientos', async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /planillas-sap/ordenes-compra/:codigoProveedor — OC lookup from SAP
+// ---------------------------------------------------------------------------
+router.get('/ordenes-compra/:codigoProveedor', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
+  const codigoProveedor = String(req.params.codigoProveedor || '').trim();
+  if (!codigoProveedor || codigoProveedor.length > 20) {
+    res.status(400).json({ error: 'codigoProveedor invalido' });
+    return;
+  }
+
+  try {
+    const { queryRfc } = require('../modules/sap-sync/sap-query');
+    const { config } = require('../config');
+    const destination = config.sapEtl.defaultDestination;
+
+    // LIFNR in SAP is 10-char left-padded with zeros
+    const lifnr = codigoProveedor.padStart(10, '0');
+
+    // 3 years back
+    const threeYearsAgo = new Date();
+    threeYearsAgo.setFullYear(threeYearsAgo.getFullYear() - 3);
+    const sapDateFrom = threeYearsAgo.toISOString().slice(0, 10).replace(/-/g, '');
+
+    const ekkoRows = await queryRfc(
+      destination,
+      'EKKO',
+      ['EBELN', 'LIFNR', 'AEDAT', 'ERNAM', 'BUKRS', 'BSART'],
+      `LIFNR = '${lifnr}' AND AEDAT >= '${sapDateFrom}'`
+    );
+
+    if (!ekkoRows || ekkoRows.length === 0) {
+      res.json({ data: { ordenes: [] } });
+      return;
+    }
+
+    // Sort by AEDAT desc (most recent first)
+    ekkoRows.sort((a, b) => {
+      const da = String(a.AEDAT || '');
+      const db = String(b.AEDAT || '');
+      return db.localeCompare(da);
+    });
+
+    // Collect unique EBELNs and fetch EKPO in batches
+    const ebelnList = [...new Set(ekkoRows.map(r => String(r.EBELN || '').trim()).filter(Boolean))];
+
+    let allEkpoRows = [];
+    const BATCH = 40;
+    for (let i = 0; i < ebelnList.length; i += BATCH) {
+      const batch = ebelnList.slice(i, i + BATCH);
+      const inClause = batch.map(e => `'${e}'`).join(',');
+      const rows = await queryRfc(
+        destination,
+        'EKPO',
+        ['EBELN', 'EBELP', 'MATNR', 'TXZ01', 'MENGE', 'MEINS'],
+        `EBELN IN (${inClause})`
+      );
+      allEkpoRows.push(...(rows || []));
+    }
+
+    // Group EKPO by EBELN
+    const ekpoByEbeln = new Map();
+    for (const row of allEkpoRows) {
+      const key = String(row.EBELN || '').trim();
+      if (!ekpoByEbeln.has(key)) ekpoByEbeln.set(key, []);
+      ekpoByEbeln.get(key).push({
+        ebelp: String(row.EBELP || '').trim(),
+        matnr: String(row.MATNR || '').trim(),
+        txz01: String(row.TXZ01 || '').trim(),
+        menge: String(row.MENGE || '').trim(),
+        meins: String(row.MEINS || '').trim(),
+      });
+    }
+
+    // Build response
+    const ordenes = ekkoRows.map(r => {
+      const ebeln = String(r.EBELN || '').trim();
+      return {
+        ebeln,
+        aedat: String(r.AEDAT || '').trim(),
+        ernam: String(r.ERNAM || '').trim(),
+        bukrs: String(r.BUKRS || '').trim(),
+        bsart: String(r.BSART || '').trim(),
+        posiciones: ekpoByEbeln.get(ebeln) || [],
+      };
+    });
+
+    res.json({ data: { ordenes } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /planillas-sap/:id — detail
 // ---------------------------------------------------------------------------
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
   const id = parsePositiveInt(req.params.id, 0);
   if (!id) { res.status(400).json({ error: 'id inválido' }); return; }
   try {
@@ -458,10 +543,7 @@ router.get('/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /planillas-sap/generar — generate from selected movements
 // ---------------------------------------------------------------------------
-router.post('/generar', validate({ body: generarBody }), async (req, res, next) => {
-  const { allowed } = await checkPlanillasPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
-
+router.post('/generar', requirePermission("planillas.generar"), validate({ body: generarBody }), async (req, res, next) => {
   const {
     facturas_ids, movimientos_ids,
     fecha_documento, fecha_contabilizacion,
@@ -493,11 +575,12 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       return;
     }
 
-    // Build OC lookup
+    // Build OC lookup keyed by id_productor|especie
     const ocMap = {};
     if (productores_oc) {
       for (const p of productores_oc) {
-        ocMap[p.id_productor] = { orden_compra: p.orden_compra, posicion_oc: p.posicion_oc || '10' };
+        const key = `${p.id_productor}|${p.especie || ''}`;
+        ocMap[key] = { orden_compra: p.orden_compra, posicion_oc: p.posicion_oc || '10' };
       }
     }
 
@@ -521,19 +604,14 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
         cm.Codigo AS CuentaMayorCodigo,
         cf.IdProductor,
         prod.CodigoProveedor, prod.Nombre AS ProductorNombre,
-        EspecieNombre = (
-          SELECT TOP 1 esp.Glosa
-          FROM [cfl].[DetalleFlete] df
-          INNER JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
-          WHERE df.IdCabeceraFlete = cf.IdCabeceraFlete
-          ORDER BY COALESCE(df.Cantidad, 0) DESC, COALESCE(df.Peso, 0) DESC
-        ),
+        EspecieNombre = esp.Glosa,
         cf.MontoAplicado
       FROM [cfl].[CabeceraFlete] cf
       INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = cf.IdFactura
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
       LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
       LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
+      LEFT JOIN [cfl].[Especie] esp ON esp.IdEspecie = cf.IdEspecie
       WHERE cf.IdCabeceraFlete IN (${movParams.join(',')})
         AND cf.IdFactura IN (${facParamsMov.join(',')})
         AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO', 'COMPLETADO')
@@ -710,7 +788,8 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
       for (const linea of creditLines) {
         lineNum++;
         totalLineas++;
-        const oc = ocMap[linea.id_productor] || {};
+        const ocKey = `${linea.id_productor}|${linea.especie || ''}`;
+        const oc = ocMap[ocKey] || ocMap[`${linea.id_productor}|`] || {};
         await new sql.Request(transaction)
           .input('idDoc', sql.BigInt, idDoc)
           .input('numLinea', sql.Int, lineNum)
@@ -770,7 +849,7 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
 // ---------------------------------------------------------------------------
 // GET /planillas-sap/:id/facturas-elegibles — available prefacturas for same period
 // ---------------------------------------------------------------------------
-router.get('/:id/facturas-elegibles', async (req, res, next) => {
+router.get('/:id/facturas-elegibles', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
   const id = parsePositiveInt(req.params.id, 0);
   if (!id) { res.status(400).json({ error: 'id inválido' }); return; }
 
@@ -827,12 +906,9 @@ router.get('/:id/facturas-elegibles', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /planillas-sap/:id/facturas — add pre facturas to generada planilla
 // ---------------------------------------------------------------------------
-router.post('/:id/facturas', validate({ params: idParam, body: agregarFacturasBody }), async (req, res, next) => {
+router.post('/:id/facturas', requirePermission("planillas.generar"), validate({ params: idParam, body: agregarFacturasBody }), async (req, res, next) => {
   const id = Number(req.params.id);
   const { facturas_ids } = req.body;
-
-  const { allowed } = await checkPlanillasPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
 
   let transaction;
   try {
@@ -879,13 +955,10 @@ router.post('/:id/facturas', validate({ params: idParam, body: agregarFacturasBo
 // ---------------------------------------------------------------------------
 // DELETE /planillas-sap/:id/facturas/:id_factura — remove pre factura from planilla
 // ---------------------------------------------------------------------------
-router.delete('/:id/facturas/:id_factura', async (req, res, next) => {
+router.delete('/:id/facturas/:id_factura', requirePermission("planillas.generar"), async (req, res, next) => {
   const id = parsePositiveInt(req.params.id, 0);
   const idFactura = parsePositiveInt(req.params.id_factura, 0);
   if (!id || !idFactura) { res.status(400).json({ error: 'Parámetros inválidos' }); return; }
-
-  const { allowed } = await checkPlanillasPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
 
   let transaction;
   try {
@@ -935,7 +1008,7 @@ router.delete('/:id/facturas/:id_factura', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /planillas-sap/:id/export — download Excel
 // ---------------------------------------------------------------------------
-router.get('/:id/export', async (req, res, next) => {
+router.get('/:id/export', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
   const id = parsePositiveInt(req.params.id, 0);
   if (!id) { res.status(400).json({ error: 'id inválido' }); return; }
 
@@ -957,12 +1030,9 @@ router.get('/:id/export', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PATCH /planillas-sap/:id/estado — enviada or anulada
 // ---------------------------------------------------------------------------
-router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody }), async (req, res, next) => {
+router.patch('/:id/estado', requirePermission("planillas.generar"), validate({ params: idParam, body: cambiarEstadoBody }), async (req, res, next) => {
   const id = req.params.id;
   const { estado } = req.body;
-
-  const { allowed } = await checkPlanillasPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
 
   try {
     const pool = await getPool();

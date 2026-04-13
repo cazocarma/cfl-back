@@ -2,9 +2,9 @@
 
 const express = require('express');
 const { getPool, sql } = require('../db');
-const { resolveAuthzContext, hasAnyPermission } = require('../authz');
 const { parsePositiveInt } = require('../utils/parse');
 const { validate } = require('../middleware/validate.middleware');
+const { requirePermission } = require('../middleware/authz.middleware');
 const {
   previewBody,
   generarBody,
@@ -24,14 +24,6 @@ const {
 const { generatePreFacturaPdf } = require('../services/factura-pdf');
 
 const router = express.Router();
-
-/** Verifica que el usuario tenga permiso de facturación o sea administrador. */
-async function checkFacturacionPerm(req) {
-  const authzContext = await resolveAuthzContext(req);
-  const isAdmin = String(authzContext?.primaryRole || '').toLowerCase() === 'administrador';
-  const hasPerm = hasAnyPermission(authzContext, ['facturacion', 'facturas.editar', 'facturas.generar']);
-  return { authzContext, allowed: isAdmin || hasPerm };
-}
 
 /**
  * Calcula el detalle de cada grupo de movimientos que se generará como factura.
@@ -115,6 +107,26 @@ async function computePreview(pool, idEmpresa, grupos) {
   }
 
   return result;
+}
+
+/**
+ * Lee el estado de una factura dentro de una transaccion con lock exclusivo.
+ * Previene race conditions TOCTOU al garantizar que ningun otro proceso
+ * pueda modificar la fila entre la lectura y la escritura posterior.
+ *
+ * @param {import('mssql').Transaction} transaction - Transaccion activa
+ * @param {number} idFactura
+ * @returns {Promise<{id_factura: number, estado: string} | null>}
+ */
+async function lockFacturaEstado(transaction, idFactura) {
+  const result = await new sql.Request(transaction)
+    .input('idFactura', sql.BigInt, idFactura)
+    .query(`
+      SELECT IdFactura, estado
+      FROM [cfl].[CabeceraFactura] WITH (XLOCK, ROWLOCK)
+      WHERE IdFactura = @idFactura;
+    `);
+  return result.recordset[0] || null;
 }
 
 /** Carga una factura completa (cabecera + movimientos). */
@@ -290,7 +302,7 @@ function consolidarDetalles(detalles) {
 // GET /facturas/empresas-elegibles
 // Empresas con al menos un movimiento en estado COMPLETADO sin factura asignada
 // ---------------------------------------------------------------------------
-router.get('/empresas-elegibles', async (req, res, next) => {
+router.get('/empresas-elegibles', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   try {
     const pool = await getPool();
 
@@ -327,7 +339,7 @@ router.get('/empresas-elegibles', async (req, res, next) => {
 // GET /facturas/periodos-con-movimientos?id_empresa=X
 // Meses con movimientos elegibles para una empresa transportista
 // ---------------------------------------------------------------------------
-router.get('/periodos-con-movimientos', async (req, res, next) => {
+router.get('/periodos-con-movimientos', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   const idEmpresa = parsePositiveInt(req.query.id_empresa, 0);
   if (!idEmpresa) {
     res.status(400).json({ error: 'id_empresa requerido' });
@@ -364,7 +376,7 @@ router.get('/periodos-con-movimientos', async (req, res, next) => {
 // GET /facturas/movimientos-elegibles?id_empresa=X&desde=Y&hasta=Z
 // Movimientos COMPLETADO sin factura para una empresa, en rango de fechas
 // ---------------------------------------------------------------------------
-router.get('/movimientos-elegibles', async (req, res, next) => {
+router.get('/movimientos-elegibles', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   const idEmpresa = parsePositiveInt(req.query.id_empresa, 0);
   if (!idEmpresa) {
     res.status(400).json({ error: 'id_empresa requerido' });
@@ -439,7 +451,7 @@ router.get('/movimientos-elegibles', async (req, res, next) => {
 // POST /facturas/preview
 // Calcula cuántas facturas se generarán antes de confirmar
 // ---------------------------------------------------------------------------
-router.post('/preview', validate({ body: previewBody }), async (req, res, next) => {
+router.post('/preview', requirePermission("facturas.ver", "facturas.editar"), validate({ body: previewBody }), async (req, res, next) => {
   const { id_empresa, grupos } = req.body;
 
   if (!id_empresa || !Array.isArray(grupos) || grupos.length === 0) {
@@ -465,17 +477,11 @@ router.post('/preview', validate({ body: previewBody }), async (req, res, next) 
 // POST /facturas/generar
 // Confirma generación: persiste facturas y marca fletes como PREFACTURADO
 // ---------------------------------------------------------------------------
-router.post('/generar', validate({ body: generarBody }), async (req, res, next) => {
+router.post('/generar', requirePermission("facturas.editar"), validate({ body: generarBody }), async (req, res, next) => {
   const { id_empresa, grupos } = req.body;
 
   if (!id_empresa || !Array.isArray(grupos) || grupos.length === 0) {
     res.status(400).json({ error: 'Faltan id_empresa o grupos' });
-    return;
-  }
-
-  const { allowed } = await checkFacturacionPerm(req);
-  if (!allowed) {
-    res.status(403).json({ error: 'Sin permiso de pre facturación' });
     return;
   }
 
@@ -555,7 +561,7 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
         setReq.input('updatedAt', sql.DateTime2(0), now);
         const inFragment = buildInClause(setReq, fleteIds, 'gf');
 
-        await setReq.query(`
+        const updateResult = await setReq.query(`
           UPDATE [cfl].[CabeceraFlete]
           SET IdFactura = @idFactura,
               estado = 'PREFACTURADO',
@@ -564,6 +570,14 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
             AND UPPER(estado) = 'COMPLETADO'
             AND IdFactura IS NULL;
         `);
+
+        if (updateResult.rowsAffected[0] !== fleteIds.length) {
+          await transaction.rollback();
+          res.status(409).json({
+            error: 'Algunos fletes ya no estan disponibles (fueron tomados por otra factura o cambiaron de estado)',
+          });
+          return;
+        }
       }
     }
 
@@ -578,7 +592,7 @@ router.post('/generar', validate({ body: generarBody }), async (req, res, next) 
 // ---------------------------------------------------------------------------
 // GET /facturas — lista con filtros opcionales
 // ---------------------------------------------------------------------------
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   try {
     const pool = await getPool();
     const { empresa, estado, desde, hasta } = req.query;
@@ -649,7 +663,7 @@ router.get('/', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /facturas/:id
 // ---------------------------------------------------------------------------
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   const idFactura = parsePositiveInt(req.params.id, 0);
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
@@ -672,7 +686,7 @@ router.get('/:id', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // POST /facturas/:id/movimientos — agregar movimientos a factura en Borrador
 // ---------------------------------------------------------------------------
-router.post('/:id/movimientos', validate({ params: idParam, body: agregarMovimientosBody }), async (req, res, next) => {
+router.post('/:id/movimientos', requirePermission("facturas.editar"), validate({ params: idParam, body: agregarMovimientosBody }), async (req, res, next) => {
   const idFactura = req.params.id;
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
@@ -685,24 +699,25 @@ router.post('/:id/movimientos', validate({ params: idParam, body: agregarMovimie
     return;
   }
 
-  const { allowed } = await checkFacturacionPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
-
   let transaction;
   try {
     const pool = await getPool();
-    const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    const factura = await lockFacturaEstado(transaction, idFactura);
+    if (!factura) {
+      await transaction.rollback();
+      res.status(404).json({ error: 'Pre factura no encontrada' });
+      return;
+    }
     if (factura.estado !== 'borrador') {
+      await transaction.rollback();
       res.status(409).json({ error: 'Solo se pueden agregar movimientos a pre facturas en estado Borrador' });
       return;
     }
 
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
     const now = new Date();
-
-    // Verify all fletes are COMPLETADO with no factura, then assign
     const fleteIds = ids_cabecera_flete.map(Number);
     const setReq = new sql.Request(transaction);
     setReq.input('idFactura', sql.BigInt, idFactura);
@@ -719,7 +734,6 @@ router.post('/:id/movimientos', validate({ params: idParam, body: agregarMovimie
         AND IdFactura IS NULL;
     `);
 
-    // Recalcular montos de la factura
     await recalcularMontos(transaction, idFactura, now);
 
     await transaction.commit();
@@ -733,7 +747,7 @@ router.post('/:id/movimientos', validate({ params: idParam, body: agregarMovimie
 // ---------------------------------------------------------------------------
 // DELETE /facturas/:id/movimientos/:id_flete — quitar movimiento de factura Borrador
 // ---------------------------------------------------------------------------
-router.delete('/:id/movimientos/:id_flete', async (req, res, next) => {
+router.delete('/:id/movimientos/:id_flete', requirePermission("facturas.editar"), async (req, res, next) => {
   const idFactura = parsePositiveInt(req.params.id, 0);
   const idFlete   = parsePositiveInt(req.params.id_flete, 0);
   if (!idFactura || !idFlete) {
@@ -741,24 +755,25 @@ router.delete('/:id/movimientos/:id_flete', async (req, res, next) => {
     return;
   }
 
-  const { allowed } = await checkFacturacionPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
-
   let transaction;
   try {
     const pool = await getPool();
-    const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    const factura = await lockFacturaEstado(transaction, idFactura);
+    if (!factura) {
+      await transaction.rollback();
+      res.status(404).json({ error: 'Pre factura no encontrada' });
+      return;
+    }
     if (factura.estado !== 'borrador') {
+      await transaction.rollback();
       res.status(409).json({ error: 'Solo se pueden quitar movimientos de pre facturas en estado Borrador' });
       return;
     }
 
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
     const now = new Date();
-
-    // Set flete back to COMPLETADO with no factura
     await new sql.Request(transaction)
       .input('idFlete',   sql.BigInt, idFlete)
       .input('idFactura', sql.BigInt, idFactura)
@@ -785,42 +800,44 @@ router.delete('/:id/movimientos/:id_flete', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // PUT /facturas/:id — editar cabecera (solo Borrador)
 // ---------------------------------------------------------------------------
-router.put('/:id', validate({ params: idParam, body: actualizarFacturaBody }), async (req, res, next) => {
+router.put('/:id', requirePermission("facturas.editar", "facturas.conciliar"), validate({ params: idParam, body: actualizarFacturaBody }), async (req, res, next) => {
   const idFactura = req.params.id;
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
     return;
   }
 
-  const { allowed } = await checkFacturacionPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
-
   const { observaciones, criterio_agrupacion } = req.body || {};
 
   let transaction;
   try {
     const pool = await getPool();
-    const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
+
+    const factura = await lockFacturaEstado(transaction, idFactura);
+    if (!factura) {
+      await transaction.rollback();
+      res.status(404).json({ error: 'Pre factura no encontrada' });
+      return;
+    }
     if (factura.estado !== 'borrador') {
+      await transaction.rollback();
       res.status(409).json({ error: 'Solo se puede editar una pre factura en estado Borrador' });
       return;
     }
 
     const now = new Date();
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
-
     await new sql.Request(transaction)
       .input('idFactura',          sql.BigInt,    idFactura)
       .input('observaciones',      sql.VarChar(500), observaciones ?? null)
-      .input('criterioAgrupacion', sql.VarChar(30),  criterio_agrupacion ?? factura.criterio_agrupacion)
+      .input('criterioAgrupacion', sql.VarChar(30),  criterio_agrupacion ?? null)
       .input('updatedAt',          sql.DateTime2(0), now)
       .query(`
         UPDATE [cfl].[CabeceraFactura]
         SET Observaciones      = @observaciones,
-            CriterioAgrupacion = @criterioAgrupacion,
-            FechaActualizacion          = @updatedAt
+            CriterioAgrupacion = COALESCE(@criterioAgrupacion, CriterioAgrupacion),
+            FechaActualizacion = @updatedAt
         WHERE IdFactura = @idFactura;
       `);
 
@@ -836,7 +853,7 @@ router.put('/:id', validate({ params: idParam, body: actualizarFacturaBody }), a
 // PATCH /facturas/:id/estado — transición de estado
 // Body: { estado: 'anulada' | 'recibida' }
 // ---------------------------------------------------------------------------
-router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody }), async (req, res, next) => {
+router.patch('/:id/estado', requirePermission("facturas.editar"), validate({ params: idParam, body: cambiarEstadoBody }), async (req, res, next) => {
   const idFactura = req.params.id;
   if (!idFactura) {
     res.status(400).json({ error: 'id_factura inválido' });
@@ -857,27 +874,30 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
     return;
   }
 
-  const { allowed } = await checkFacturacionPerm(req);
-  if (!allowed) { res.status(403).json({ error: 'Sin permiso' }); return; }
-
   let transaction;
   try {
     const pool = await getPool();
-    const factura = await fetchFactura(pool, idFactura);
-    if (!factura) { res.status(404).json({ error: 'Pre factura no encontrada' }); return; }
+    transaction = new sql.Transaction(pool);
+    await transaction.begin();
 
-    // Validar transición de estado
+    const factura = await lockFacturaEstado(transaction, idFactura);
+    if (!factura) {
+      await transaction.rollback();
+      res.status(404).json({ error: 'Pre factura no encontrada' });
+      return;
+    }
+
     if (nuevoEstado === 'recibida' && factura.estado !== 'borrador') {
+      await transaction.rollback();
       res.status(409).json({ error: 'Solo se puede marcar como recibida una pre factura en estado Borrador' });
       return;
     }
     if (nuevoEstado === 'anulada' && (factura.estado === 'anulada' || factura.estado === 'recibida')) {
+      await transaction.rollback();
       res.status(409).json({ error: 'La pre factura no se puede anular desde su estado actual' });
       return;
     }
 
-    transaction = new sql.Transaction(pool);
-    await transaction.begin();
     const now = new Date();
 
     const updateReq = new sql.Request(transaction)
@@ -902,10 +922,17 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
       `);
     }
 
-    const fleteIds = factura.movimientos.map(m => m.id_cabecera_flete);
+    // Leer fletes vinculados dentro de la transaccion
+    const movResult = await new sql.Request(transaction)
+      .input('idFactura', sql.BigInt, idFactura)
+      .query(`
+        SELECT IdCabeceraFlete
+        FROM [cfl].[CabeceraFlete]
+        WHERE IdFactura = @idFactura;
+      `);
+    const fleteIds = movResult.recordset.map(m => m.id_cabecera_flete ?? m.IdCabeceraFlete);
 
     if (nuevoEstado === 'anulada' && fleteIds.length) {
-      // Devolver fletes a COMPLETADO con IdFactura=NULL
       const revertReq = new sql.Request(transaction);
       revertReq.input('updatedAt', sql.DateTime2(0), now);
       const inFragment = buildInClause(revertReq, fleteIds, 'an');
@@ -920,7 +947,6 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
     }
 
     if (nuevoEstado === 'recibida' && fleteIds.length) {
-      // Transition fletes from PREFACTURADO -> FACTURADO
       await updateFletesEstado(transaction, fleteIds, 'PREFACTURADO', 'FACTURADO', now);
     }
 
@@ -935,7 +961,7 @@ router.patch('/:id/estado', validate({ params: idParam, body: cambiarEstadoBody 
 // ---------------------------------------------------------------------------
 // GET /facturas/:id/export/excel
 // ---------------------------------------------------------------------------
-router.get('/:id/export/excel', async (req, res, next) => {
+router.get('/:id/export/excel', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   const idFactura = parsePositiveInt(req.params.id, 0);
   if (!idFactura) { res.status(400).json({ error: 'id_factura inválido' }); return; }
 
@@ -1039,7 +1065,7 @@ router.get('/:id/export/excel', async (req, res, next) => {
 // ---------------------------------------------------------------------------
 // GET /facturas/:id/export/pdf
 // ---------------------------------------------------------------------------
-router.get('/:id/export/pdf', async (req, res, next) => {
+router.get('/:id/export/pdf', requirePermission("facturas.ver", "facturas.editar", "facturas.conciliar"), async (req, res, next) => {
   const idFactura = parsePositiveInt(req.params.id, 0);
   if (!idFactura) { res.status(400).json({ error: 'id_factura inválido' }); return; }
 

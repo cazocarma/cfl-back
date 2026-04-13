@@ -80,14 +80,11 @@ const config = {
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
   },
-  sapAdapter: {
-    baseUrl: trimTrailingSlash(
-      process.env.SAP_ADAPTER_BASE_URL || process.env.SAP_ADAPTER_API_URL,
-      ""
-    ),
+  sapEtl: {
+    baseUrl: trimTrailingSlash(process.env.SAP_ETL_BASE_URL, ""),
     token: validateSapToken(),
-    defaultDestination: (process.env.SAP_ADAPTER_DEFAULT_DESTINATION || "PRD").trim().toUpperCase(),
-    requestTimeoutMs: toNumber(process.env.SAP_ADAPTER_REQUEST_TIMEOUT_MS, 125000),
+    defaultDestination: (process.env.SAP_ETL_DEFAULT_DESTINATION || "PRD").trim().toUpperCase(),
+    requestTimeoutMs: toNumber(process.env.SAP_ETL_REQUEST_TIMEOUT_MS, 125000),
   },
   cflSapLoad: {
     maxDateRangeDays: toNumber(process.env.CFL_ETL_MAX_DATE_RANGE_DAYS, 30),
@@ -119,17 +116,17 @@ function requireJwtSecret() {
 }
 
 function validateSapToken() {
-  const token = process.env.SAP_ADAPTER_API_TOKEN || process.env.SAP_ADAPTER_TOKEN || "";
+  const token = process.env.SAP_ETL_API_TOKEN || "";
 
   if (!token) {
-    logger.warn("SAP_ADAPTER_API_TOKEN no esta definido — integracion SAP deshabilitada");
+    logger.warn("SAP_ETL_API_TOKEN no esta definido — integracion SAP deshabilitada");
     return "";
   }
 
   const tokenBytes = Buffer.byteLength(token, "utf8");
   if (tokenBytes < MIN_SAP_TOKEN_BYTES) {
     logger.warn(
-      `SAP_ADAPTER_API_TOKEN es muy corto (${tokenBytes} bytes). ` +
+      `SAP_ETL_API_TOKEN es muy corto (${tokenBytes} bytes). ` +
         `Se recomiendan al menos ${MIN_SAP_TOKEN_BYTES} bytes.`
     );
   }

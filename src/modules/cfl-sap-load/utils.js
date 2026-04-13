@@ -141,20 +141,20 @@ function buildSourceName(job) {
   if (job.job_type === JOB_TYPE.VBELN) {
     const count = Array.isArray(job.vbelns) ? job.vbelns.length : 0;
     if (count === 1) {
-      return `CFL OnDemand VBELN ${job.vbelns[0]} via SAP Adapter`;
+      return `CFL OnDemand VBELN ${job.vbelns[0]} via SAP ETL`;
     }
-    return `CFL OnDemand ${count} VBELN via SAP Adapter`;
+    return `CFL OnDemand ${count} VBELN via SAP ETL`;
   }
 
   if (job.job_type === JOB_TYPE.XBLNR) {
     const count = Array.isArray(job.xblnrs) ? job.xblnrs.length : 0;
     if (count === 1) {
-      return `CFL OnDemand XBLNR ${job.xblnrs[0]} via SAP Adapter`;
+      return `CFL OnDemand XBLNR ${job.xblnrs[0]} via SAP ETL`;
     }
-    return `CFL OnDemand ${count} XBLNR via SAP Adapter`;
+    return `CFL OnDemand ${count} XBLNR via SAP ETL`;
   }
 
-  return `CFL OnDemand DateRange ${job.fecha_desde}..${job.fecha_hasta} via SAP Adapter`;
+  return `CFL OnDemand DateRange ${job.fecha_desde}..${job.fecha_hasta} via SAP ETL`;
 }
 
 function buildScopeKey(job) {

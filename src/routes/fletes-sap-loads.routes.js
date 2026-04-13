@@ -1,32 +1,11 @@
 const express = require("express");
-const { resolveAuthzContext, hasAnyPermission } = require("../authz");
 const { cflSapLoadService } = require("../modules/cfl-sap-load/service");
+const { requirePermission } = require("../middleware/authz.middleware");
 
 const router = express.Router();
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-async function ensurePermission(req, res, permissionKeys, message) {
-  const authzContext = await resolveAuthzContext(req);
-  const allowed = hasAnyPermission(authzContext, [...permissionKeys, "mantenedores.admin"]);
-  if (!allowed) {
-    res.status(403).json({ error: message });
-    return false;
-  }
-  return true;
-}
-
-router.post("/vbeln", async (req, res, next) => {
-  if (
-    !(await ensurePermission(
-      req,
-      res,
-      ["fletes.sap.etl.ejecutar"],
-      "No tienes permisos para ejecutar cargas SAP"
-    ))
-  ) {
-    return;
-  }
-
+router.post("/vbeln", requirePermission("fletes.sap.etl.ejecutar"), async (req, res, next) => {
   req.auditContext = {
     entity: "fletes.cargas-sap",
     action: "ejecutar-vbeln",
@@ -54,18 +33,7 @@ router.post("/vbeln", async (req, res, next) => {
   }
 });
 
-router.post("/xblnr", async (req, res, next) => {
-  if (
-    !(await ensurePermission(
-      req,
-      res,
-      ["fletes.sap.etl.ejecutar"],
-      "No tienes permisos para ejecutar cargas SAP"
-    ))
-  ) {
-    return;
-  }
-
+router.post("/xblnr", requirePermission("fletes.sap.etl.ejecutar"), async (req, res, next) => {
   req.auditContext = {
     entity: "fletes.cargas-sap",
     action: "ejecutar-xblnr",
@@ -93,18 +61,7 @@ router.post("/xblnr", async (req, res, next) => {
   }
 });
 
-router.post("/rango-fechas", async (req, res, next) => {
-  if (
-    !(await ensurePermission(
-      req,
-      res,
-      ["fletes.sap.etl.ejecutar"],
-      "No tienes permisos para ejecutar cargas SAP"
-    ))
-  ) {
-    return;
-  }
-
+router.post("/rango-fechas", requirePermission("fletes.sap.etl.ejecutar"), async (req, res, next) => {
   req.auditContext = {
     entity: "fletes.cargas-sap",
     action: "ejecutar-rango-fechas",
@@ -133,18 +90,7 @@ router.post("/rango-fechas", async (req, res, next) => {
   }
 });
 
-router.get("/jobs", async (req, res, next) => {
-  if (
-    !(await ensurePermission(
-      req,
-      res,
-      ["fletes.sap.etl.ver"],
-      "No tienes permisos para consultar jobs de cargas SAP"
-    ))
-  ) {
-    return;
-  }
-
+router.get("/jobs", requirePermission("fletes.sap.etl.ver"), async (req, res, next) => {
   try {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 50);
     const userId = req.authnClaims?.id_usuario || null;
@@ -155,18 +101,7 @@ router.get("/jobs", async (req, res, next) => {
   }
 });
 
-router.get("/jobs/ultimo", async (req, res, next) => {
-  if (
-    !(await ensurePermission(
-      req,
-      res,
-      ["fletes.sap.etl.ver"],
-      "No tienes permisos para consultar jobs de cargas SAP"
-    ))
-  ) {
-    return;
-  }
-
+router.get("/jobs/ultimo", requirePermission("fletes.sap.etl.ver"), async (req, res, next) => {
   try {
     const userId = req.authnClaims?.id_usuario || null;
     const job = await cflSapLoadService.getLatestJob(userId);
@@ -181,18 +116,7 @@ router.get("/jobs/ultimo", async (req, res, next) => {
   }
 });
 
-router.get("/jobs/:jobId", async (req, res, next) => {
-  if (
-    !(await ensurePermission(
-      req,
-      res,
-      ["fletes.sap.etl.ver"],
-      "No tienes permisos para consultar jobs de cargas SAP"
-    ))
-  ) {
-    return;
-  }
-
+router.get("/jobs/:jobId", requirePermission("fletes.sap.etl.ver"), async (req, res, next) => {
   if (!GUID_PATTERN.test(String(req.params.jobId || "").trim())) {
     res.status(400).json({ error: "job_id invalido" });
     return;

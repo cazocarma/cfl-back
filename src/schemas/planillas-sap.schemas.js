@@ -12,6 +12,7 @@ const generarBody = z.object({
   indicador_impuesto: z.string().max(10).default('C0'),
   productores_oc: z.array(z.object({
     id_productor: z.coerce.number().int().positive(),
+    especie: z.string().max(50).optional(),
     orden_compra: z.string().max(30),
     posicion_oc: z.string().max(10).default('10'),
   })).optional(),

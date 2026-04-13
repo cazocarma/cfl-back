@@ -5,6 +5,7 @@ const { MAINTAINERS } = require("../mantenedores-config");
 const { hasAnyPermission, resolveAuthzContext } = require("../authz");
 const { normalizeLifecycleStatus } = require("../utils/lifecycle");
 const { validate } = require("../middleware/validate.middleware");
+const { requirePermission } = require("../middleware/authz.middleware");
 const { crearUsuarioBody, actualizarUsuarioBody } = require("../schemas/usuarios.schemas");
 
 const router = express.Router();
@@ -137,7 +138,9 @@ function isInvalidObjectNameError(error) {
   return number === 208 || /invalid object name/i.test(message);
 }
 
-async function fetchTiposFleteRows(pool) {
+async function fetchTiposFleteRows(pool, activoFilter = 'todos') {
+  const whereClause = activoFilter === 'si' ? 'WHERE t.Activo = 1'
+    : activoFilter === 'no' ? 'WHERE t.Activo = 0' : '';
   const sqlNuevo = `
     SELECT
       t.IdTipoFlete,
@@ -152,7 +155,7 @@ async function fetchTiposFleteRows(pool) {
       WHERE i.IdTipoFlete = t.IdTipoFlete
         AND i.Activo = 1
     ) im
-    WHERE t.Activo = 1
+    ${whereClause}
     ORDER BY t.Nombre ASC;
   `;
 
@@ -374,17 +377,8 @@ async function getRelationsForEntity(pool, entity, id) {
 }
 
 // ── Temporada activa ─────────────────────────────────────────────────────────
-router.get("/temporadas/activa", async (req, res, next) => {
+router.get("/temporadas/activa", requirePermission("mantenedores.view"), async (req, res, next) => {
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!hasAnyPermission(authzContext, maintainerReadPermissions("temporadas"))) {
-      res.status(403).json({
-        error: "Sin permisos para consultar temporadas",
-        role: authzContext?.primaryRole || null,
-      });
-      return;
-    }
-
     const pool = await getPool();
     const result = await pool.request().query(`
       SELECT TOP 1
@@ -407,19 +401,11 @@ router.get("/temporadas/activa", async (req, res, next) => {
 
 // ── Tarifas con filtro de temporada ──────────────────────────────────────────
 // Debe ir ANTES de router.get('/:entity') para sobreescribir el genérico
-router.get("/tarifas", async (req, res, next) => {
+router.get("/tarifas", requirePermission("mantenedores.view"), async (req, res, next) => {
   const entityConfig = MAINTAINERS["tarifas"];
 
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!hasAnyPermission(authzContext, maintainerReadPermissions("tarifas"))) {
-      res.status(403).json({
-        error: "Sin permisos para consultar tarifas",
-        role: authzContext?.primaryRole || null,
-        entity: "tarifas",
-      });
-      return;
-    }
+    const authzContext = req.authzContext;
 
     const pool = await getPool();
 
@@ -471,7 +457,7 @@ router.get("/tarifas", async (req, res, next) => {
 });
 
 // ── Usuarios: obtener roles asignados ────────────────────────────────────────
-router.get("/usuarios/:id/roles", async (req, res, next) => {
+router.get("/usuarios/:id/roles", requirePermission("mantenedores.view"), async (req, res, next) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: "ID de usuario inválido" });
@@ -479,15 +465,6 @@ router.get("/usuarios/:id/roles", async (req, res, next) => {
   }
 
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!hasAnyPermission(authzContext, maintainerReadPermissions("usuarios"))) {
-      res.status(403).json({
-        error: "Sin permisos para consultar usuarios",
-        role: authzContext?.primaryRole || null,
-      });
-      return;
-    }
-
     const pool = await getPool();
     const result = await pool.request().input("id", id).query(`
       SELECT r.IdRol, r.Nombre, r.Descripcion, r.Activo
@@ -504,7 +481,7 @@ router.get("/usuarios/:id/roles", async (req, res, next) => {
 });
 
 // ── Usuarios: asignar rol ────────────────────────────────────────────────────
-router.post("/usuarios/:id/roles", async (req, res, next) => {
+router.post("/usuarios/:id/roles", requirePermission("mantenedores.admin", "mantenedores.edit.usuarios"), async (req, res, next) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: "ID de usuario inválido" });
@@ -557,7 +534,7 @@ router.post("/usuarios/:id/roles", async (req, res, next) => {
 });
 
 // ── Usuarios: quitar rol ─────────────────────────────────────────────────────
-router.delete("/usuarios/:id/roles/:id_rol", async (req, res, next) => {
+router.delete("/usuarios/:id/roles/:id_rol", requirePermission("mantenedores.admin", "mantenedores.edit.usuarios"), async (req, res, next) => {
   const id = Number(req.params.id);
   const idRol = Number(req.params.id_rol);
 
@@ -591,7 +568,7 @@ router.delete("/usuarios/:id/roles/:id_rol", async (req, res, next) => {
 });
 
 // ── Usuarios: toggle estado activo/inactivo ──────────────────────────────────
-router.patch("/usuarios/:id/estado", async (req, res, next) => {
+router.patch("/usuarios/:id/estado", requirePermission("mantenedores.admin", "mantenedores.edit.usuarios"), async (req, res, next) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: "ID de usuario inválido" });
@@ -632,7 +609,7 @@ router.patch("/usuarios/:id/estado", async (req, res, next) => {
 
 // ── Usuarios: crear con hash bcrypt ──────────────────────────────────────────
 // Debe ir ANTES de router.post('/:entity') para sobreescribir el genérico
-router.post("/usuarios", validate({ body: crearUsuarioBody }), async (req, res, next) => {
+router.post("/usuarios", requirePermission("mantenedores.admin", "mantenedores.edit.usuarios"), validate({ body: crearUsuarioBody }), async (req, res, next) => {
   try {
     const authzContext = await ensureCanWrite(req, res, "usuarios");
     if (!authzContext) return;
@@ -702,7 +679,7 @@ router.post("/usuarios", validate({ body: crearUsuarioBody }), async (req, res, 
 
 // ── Usuarios: editar con hash bcrypt opcional ─────────────────────────────────
 // Debe ir ANTES de router.put('/:entity/:id') para sobreescribir el genérico
-router.put("/usuarios/:id", validate({ body: actualizarUsuarioBody }), async (req, res, next) => {
+router.put("/usuarios/:id", requirePermission("mantenedores.admin", "mantenedores.edit.usuarios"), validate({ body: actualizarUsuarioBody }), async (req, res, next) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: "ID de usuario inválido" });
@@ -795,16 +772,26 @@ router.put("/usuarios/:id", validate({ body: actualizarUsuarioBody }), async (re
   }
 });
 
-router.get("/resumen", async (req, res, next) => {
+// ── Sync productores desde SAP OData ──────────────────────────────────────
+router.post("/productores/sync-sap", requirePermission("mantenedores.admin"), async (req, res, next) => {
   try {
-    const authzContext = await resolveAuthzContext(req);
-    if (!hasAnyPermission(authzContext, maintainerReadPermissions("resumen"))) {
-      res.status(403).json({
-        error: "No tienes permisos para consultar mantenedores",
-        role: authzContext?.primaryRole || null,
-      });
-      return;
-    }
+    const { syncProductores } = require("../modules/sap-sync/sync-productores");
+    const result = await syncProductores();
+
+    req.auditContext = { entity: "mantenedores.productores", action: "sync-sap" };
+
+    res.json({
+      message: `Sincronizacion completada: ${result.inserted} nuevos, ${result.updated} actualizados, ${result.unchanged} sin cambios`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/resumen", requirePermission("mantenedores.view"), async (req, res, next) => {
+  try {
+    const authzContext = req.authzContext;
 
     const pool = await getPool();
 
@@ -812,10 +799,7 @@ router.get("/resumen", async (req, res, next) => {
     const entries = Object.entries(MAINTAINERS);
     const counts = await Promise.all(
       entries.map(([, entityConfig]) => {
-        const where = entityConfig.softDeleteColumn
-          ? `WHERE ${entityConfig.softDeleteColumn} = 1`
-          : "";
-        return pool.request().query(`SELECT COUNT_BIG(1) AS total FROM ${entityConfig.table} ${where};`);
+        return pool.request().query(`SELECT COUNT_BIG(1) AS total FROM ${entityConfig.table};`);
       })
     );
 
@@ -836,21 +820,14 @@ router.get("/resumen", async (req, res, next) => {
 });
 
 // Compatibilidad dedicada para catalogo critico de bandeja y mantenedor
-router.get("/tipos-flete", async (req, res, next) => {
+router.get("/tipos-flete", requirePermission("mantenedores.view"), async (req, res, next) => {
   try {
-    const authzContext = await resolveAuthzContext(req);
+    const authzContext = req.authzContext;
     const permissionEntityKey = normalizePermissionEntityKey("tipos-flete");
-    if (!hasAnyPermission(authzContext, maintainerReadPermissions(permissionEntityKey))) {
-      res.status(403).json({
-        error: "No tienes permisos para consultar este mantenedor",
-        role: authzContext?.primaryRole || null,
-        entity: "tipos-flete",
-      });
-      return;
-    }
 
     const pool = await getPool();
-    const rows = await fetchTiposFleteRows(pool);
+    const activoParam = String(req.query.activo || "todos").toLowerCase();
+    const rows = await fetchTiposFleteRows(pool, activoParam);
 
     res.json({
       data: rows,
@@ -887,7 +864,7 @@ router.get("/:entity", async (req, res, next) => {
     }
 
     const pool = await getPool();
-    const activoParam = String(req.query.activo || "si").toLowerCase();
+    const activoParam = String(req.query.activo || "todos").toLowerCase();
     let activeFilter = "";
     if (entityConfig.softDeleteColumn) {
       if (activoParam === "si") {

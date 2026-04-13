@@ -1269,6 +1269,29 @@ async function cleanupStageRows(transaction, executionId) {
     `);
 }
 
+async function restoreDiscardedOnReimport(transaction, executionId, nowUtc) {
+  await new sql.Request(transaction)
+    .input("execution_id", sql.UniqueIdentifier, executionId)
+    .input("now", sql.DateTime2(0), nowUtc)
+    .query(`
+      UPDATE sd
+      SET sd.Activo = 0,
+          sd.FechaRestauracion = @now,
+          sd.FechaActualizacion = @now
+      FROM [cfl].[SapEntregaDescarte] sd
+      INNER JOIN [cfl].[SapEntrega] e ON e.IdSapEntrega = sd.IdSapEntrega
+      INNER JOIN (
+        SELECT DISTINCT SistemaFuente, SapNumeroEntrega
+        FROM [cfl].[StgLikp]
+        WHERE IdEjecucion = @execution_id
+      ) s ON s.SistemaFuente = e.SistemaFuente AND s.SapNumeroEntrega = e.SapNumeroEntrega
+      WHERE sd.Activo = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM [cfl].[FleteSapEntrega] fe WHERE fe.IdSapEntrega = e.IdSapEntrega
+        );
+    `);
+}
+
 async function persistExtraction(jobDefinition, extraction) {
   const executionId = jobDefinition.job_id;
   const extractedAtUtc = new Date();
@@ -1309,6 +1332,7 @@ async function persistExtraction(jobDefinition, extraction) {
       jobDefinition.job_type === JOB_TYPE.DATE_RANGE
     );
 
+    await restoreDiscardedOnReimport(transaction, executionId, createdAtUtc);
     await cleanupStageRows(transaction, executionId);
     await transaction.commit();
 

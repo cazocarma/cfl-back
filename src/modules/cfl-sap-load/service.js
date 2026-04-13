@@ -13,7 +13,7 @@ const {
   serializeJobParams,
   buildSourceSystem,
 } = require("./utils");
-const { extractByVbeln, extractByXblnr, extractByDateRange } = require("./sap-adapter-client");
+const { extractByVbeln, extractByXblnr, extractByDateRange } = require("./sap-etl-client");
 const {
   failStaleJobs,
   insertQueuedJob,
@@ -322,7 +322,7 @@ class CflSapLoadService {
   async createVbelnJob({ sourceSystem, destination, vbeln, authnClaims }) {
     const normalizedDestination = normalizeDestination(
       normalizeRequestedSourceSystem(sourceSystem) || destination,
-      config.sapAdapter.defaultDestination
+      config.sapEtl.defaultDestination
     );
     if (!normalizedDestination) {
       throw buildDomainError("source_system invalido", 400);
@@ -350,7 +350,7 @@ class CflSapLoadService {
   async createXblnrJob({ sourceSystem, destination, xblnr, authnClaims }) {
     const normalizedDestination = normalizeDestination(
       normalizeRequestedSourceSystem(sourceSystem) || destination,
-      config.sapAdapter.defaultDestination
+      config.sapEtl.defaultDestination
     );
     if (!normalizedDestination) {
       throw buildDomainError("source_system invalido", 400);
@@ -379,7 +379,7 @@ class CflSapLoadService {
   async createDateRangeJob({ sourceSystem, destination, fechaDesde, fechaHasta, authnClaims }) {
     const normalizedDestination = normalizeDestination(
       normalizeRequestedSourceSystem(sourceSystem) || destination,
-      config.sapAdapter.defaultDestination
+      config.sapEtl.defaultDestination
     );
     if (!normalizedDestination) {
       throw buildDomainError("source_system invalido", 400);
