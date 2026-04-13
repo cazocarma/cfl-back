@@ -439,7 +439,7 @@ router.get('/movimientos', requirePermission("planillas.ver", "planillas.generar
 // ---------------------------------------------------------------------------
 router.get('/ordenes-compra/:codigoProveedor', requirePermission("planillas.ver", "planillas.generar"), async (req, res, next) => {
   const codigoProveedor = String(req.params.codigoProveedor || '').trim();
-  if (!codigoProveedor || codigoProveedor.length > 20) {
+  if (!codigoProveedor || codigoProveedor.length > 20 || !/^[A-Za-z0-9]+$/.test(codigoProveedor)) {
     res.status(400).json({ error: 'codigoProveedor invalido' });
     return;
   }
@@ -522,7 +522,9 @@ router.get('/ordenes-compra/:codigoProveedor', requirePermission("planillas.ver"
 
     res.json({ data: { ordenes } });
   } catch (error) {
-    next(error);
+    const { logger } = require('../logger');
+    logger.warn({ err: error.message, codigoProveedor }, 'ordenes-compra: SAP ETL no disponible, retornando lista vacia');
+    res.json({ data: { ordenes: [] } });
   }
 });
 
@@ -908,7 +910,7 @@ router.get('/:id/facturas-elegibles', requirePermission("planillas.ver", "planil
 // ---------------------------------------------------------------------------
 router.post('/:id/facturas', requirePermission("planillas.generar"), validate({ params: idParam, body: agregarFacturasBody }), async (req, res, next) => {
   const id = Number(req.params.id);
-  const { facturas_ids } = req.body;
+  const { facturas_ids, productores_oc } = req.body;
 
   let transaction;
   try {
@@ -943,6 +945,32 @@ router.post('/:id/facturas', requirePermission("planillas.generar"), validate({ 
 
     // Regenerate documents and lines
     await regenerateDocuments(transaction, id);
+
+    // Apply OC overrides from productores_oc
+    if (productores_oc && productores_oc.length > 0) {
+      for (const p of productores_oc) {
+        if (!p.orden_compra) continue;
+        const prodRes = await new sql.Request(transaction)
+          .input('idProd', sql.BigInt, p.id_productor)
+          .query(`SELECT CodigoProveedor FROM [cfl].[Productor] WHERE IdProductor = @idProd;`);
+        const codProv = prodRes.recordset[0]?.codigo_proveedor;
+        if (!codProv) continue;
+
+        await new sql.Request(transaction)
+          .input('idPlanilla', sql.BigInt, id)
+          .input('codProv', sql.NVarChar(20), codProv)
+          .input('oc', sql.NVarChar(30), p.orden_compra)
+          .input('pos', sql.NVarChar(10), p.posicion_oc || '10')
+          .query(`
+            UPDATE l SET l.OrdenCompra = @oc, l.PosicionOC = @pos
+            FROM [cfl].[PlanillaSapLinea] l
+            INNER JOIN [cfl].[PlanillaSapDocumento] d ON d.IdPlanillaSapDocumento = l.IdPlanillaSapDocumento
+            WHERE d.IdPlanillaSap = @idPlanilla AND l.CodigoProveedor = @codProv
+              AND l.ClaveContabilizacion = '29';
+          `);
+      }
+    }
+
     await transaction.commit();
 
     res.json({ message: `${facturas_ids.length} pre factura(s) agregada(s)` });
@@ -1003,6 +1031,61 @@ router.delete('/:id/facturas/:id_factura', requirePermission("planillas.generar"
     if (transaction) { try { await transaction.rollback(); } catch (_) {} }
     next(err);
   }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /planillas-sap/:id/ordenes-compra — update OC on credit lines
+// ---------------------------------------------------------------------------
+router.patch('/:id/ordenes-compra', requirePermission("planillas.generar"), async (req, res, next) => {
+  const id = parsePositiveInt(req.params.id, 0);
+  if (!id) { res.status(400).json({ error: 'id inválido' }); return; }
+
+  const { lineas } = req.body;
+  if (!Array.isArray(lineas) || lineas.length === 0) {
+    res.status(400).json({ error: 'Se requiere un arreglo de lineas' }); return;
+  }
+
+  try {
+    const pool = await getPool();
+
+    // Verify planilla exists and is generada
+    const planCheck = await pool.request().input('id', sql.BigInt, id).query(`
+      SELECT Estado FROM [cfl].[PlanillaSap] WHERE IdPlanillaSap = @id;
+    `);
+    if (!planCheck.recordset[0]) { res.status(404).json({ error: 'Planilla no encontrada' }); return; }
+    if (planCheck.recordset[0].estado.toLowerCase() !== 'generada') {
+      res.status(409).json({ error: 'Solo se pueden editar planillas en estado generada' }); return;
+    }
+
+    for (const linea of lineas) {
+      const idLinea = parsePositiveInt(linea.id_linea, 0);
+      if (!idLinea) continue;
+
+      const oc = String(linea.orden_compra || '').trim() || null;
+      const pos = String(linea.posicion_oc || '').trim() || '10';
+
+      await pool.request()
+        .input('idLinea', sql.BigInt, idLinea)
+        .input('idPlanilla', sql.BigInt, id)
+        .input('oc', sql.NVarChar(30), oc)
+        .input('pos', sql.NVarChar(10), pos)
+        .query(`
+          UPDATE l SET l.OrdenCompra = @oc, l.PosicionOC = @pos
+          FROM [cfl].[PlanillaSapLinea] l
+          INNER JOIN [cfl].[PlanillaSapDocumento] d ON d.IdPlanillaSapDocumento = l.IdPlanillaSapDocumento
+          WHERE l.IdPlanillaSapLinea = @idLinea AND d.IdPlanillaSap = @idPlanilla
+            AND l.ClaveContabilizacion = '29';
+        `);
+    }
+
+    // Update timestamp
+    await pool.request()
+      .input('id', sql.BigInt, id)
+      .input('updatedAt', sql.DateTime2(0), new Date())
+      .query(`UPDATE [cfl].[PlanillaSap] SET FechaActualizacion = @updatedAt WHERE IdPlanillaSap = @id;`);
+
+    res.json({ message: 'Órdenes de compra actualizadas' });
+  } catch (err) { next(err); }
 });
 
 // ---------------------------------------------------------------------------

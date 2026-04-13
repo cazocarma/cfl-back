@@ -28,6 +28,12 @@ const idParam = z.object({
 
 const agregarFacturasBody = z.object({
   facturas_ids: z.array(z.coerce.number().int().positive()).min(1),
+  productores_oc: z.array(z.object({
+    id_productor: z.coerce.number().int().positive(),
+    especie: z.string().max(50).optional(),
+    orden_compra: z.string().max(30),
+    posicion_oc: z.string().max(10).default('10'),
+  })).optional(),
 });
 
 module.exports = { generarBody, cambiarEstadoBody, idParam, agregarFacturasBody };
