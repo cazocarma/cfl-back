@@ -93,10 +93,12 @@ async function syncProductores() {
   const transaction = new sql.Transaction(pool);
   await transaction.begin();
 
+  const stgName = `##stg_productores_${process.pid}_${Date.now()}`;
+
   try {
-    // Create temp table
+    // Create global temp table (## so bulk load's separate connection can see it)
     await new sql.Request(transaction).query(`
-      CREATE TABLE #stg_productores (
+      CREATE TABLE ${stgName} (
         CodigoProveedor NVARCHAR(20) NOT NULL,
         Rut             NVARCHAR(20) NULL,
         Nombre          NVARCHAR(150) NOT NULL,
@@ -110,7 +112,7 @@ async function syncProductores() {
     `);
 
     // Bulk insert to staging
-    const stageTable = new sql.Table("#stg_productores");
+    const stageTable = new sql.Table(stgName);
     stageTable.create = false;
     stageTable.columns.add("CodigoProveedor", sql.NVarChar(20), { nullable: false });
     stageTable.columns.add("Rut", sql.NVarChar(20), { nullable: true });
@@ -144,7 +146,7 @@ async function syncProductores() {
       CREATE TABLE #merge_actions (MergeAction NVARCHAR(10));
 
       MERGE [cfl].[Productor] AS tgt
-      USING #stg_productores AS src
+      USING ${stgName} AS src
         ON tgt.CodigoProveedor = src.CodigoProveedor
       WHEN MATCHED AND (
            ISNULL(tgt.Rut, '')     <> ISNULL(src.Rut, '')
@@ -182,6 +184,7 @@ async function syncProductores() {
       DROP TABLE #merge_actions;
     `);
 
+    await new sql.Request(transaction).query(`DROP TABLE ${stgName};`);
     await transaction.commit();
 
     const inserted = result.recordset[0]?.inserted || 0;
@@ -193,6 +196,24 @@ async function syncProductores() {
     return { inserted, updated, unchanged, total: unique.length };
   } catch (error) {
     try { await transaction.rollback(); } catch { /* no-op */ }
+    try { await pool.request().query(`IF OBJECT_ID('tempdb..${stgName}') IS NOT NULL DROP TABLE ${stgName};`); } catch { /* no-op */ }
+    const inner = error?.originalError || error?.precedingErrors?.[0] || error?.errors?.[0];
+    logger.error({
+      message: error?.message,
+      code: error?.code,
+      innerMessage: inner?.message,
+      innerNumber: inner?.number,
+      innerState: inner?.state,
+      innerClass: inner?.class,
+      innerLineNumber: inner?.lineNumber,
+      innerKeys: inner ? Object.keys(inner) : null,
+      errorKeys: Object.keys(error || {}),
+      allErrors: JSON.stringify(
+        (error?.precedingErrors || error?.errors || []).map((e) => ({
+          message: e?.message, number: e?.number, state: e?.state, lineNumber: e?.lineNumber,
+        }))
+      ),
+    }, "Fallo sync-productores (detalle SQL)");
     throw error;
   }
 }

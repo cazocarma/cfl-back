@@ -105,12 +105,7 @@ router.get("/jobs/ultimo", requirePermission("fletes.sap.etl.ver"), async (req, 
   try {
     const userId = req.authnClaims?.id_usuario || null;
     const job = await cflSapLoadService.getLatestJob(userId);
-    if (!job) {
-      res.status(404).json({ error: "No existen jobs de cargas SAP" });
-      return;
-    }
-
-    res.json({ data: job });
+    res.json({ data: job ?? null });
   } catch (error) {
     next(error);
   }
