@@ -165,12 +165,13 @@ async function resolveImputacionFlete(transaction, {
       };
     }
 
-    return {
-      idTipoFlete: tipo,
-      idCentroCosto: centro,
-      idCuentaMayor: cuenta,
-      idImputacionFlete: null,
-    };
+    // tipo + centro + cuenta están todos definidos pero no existe una
+    // imputación activa que los combine. No se permite persistir el flete
+    // con `idImputacionFlete: null` porque rompe la planilla SAP.
+    throw buildDomainError(
+      "No existe una imputación configurada para la combinación tipo flete + centro costo + cuenta mayor. Revisa el mantenedor de Imputaciones.",
+      422,
+    );
   }
 
   const byType = await new sql.Request(transaction)
@@ -224,12 +225,15 @@ async function resolveImputacionFlete(transaction, {
     }
   }
 
-  return {
-    idTipoFlete: tipo,
-    idCentroCosto: centro,
-    idCuentaMayor: cuenta,
-    idImputacionFlete: null,
-  };
+  // No se pudo resolver una imputación única para los inputs dados
+  // (tipo flete solo, o tipo + centro/cuenta parcial con múltiples matches).
+  // En vez de retornar silenciosamente un flete "sin imputación", fallamos
+  // aquí para que el caller pida los IDs exactos (o los mantenedores se
+  // completen).
+  throw buildDomainError(
+    "No se pudo resolver una imputación única para el flete. Ingresa centro de costo y cuenta mayor específicos, o completa el mantenedor de Imputaciones.",
+    422,
+  );
 }
 
 module.exports = {

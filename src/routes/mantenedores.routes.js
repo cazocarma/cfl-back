@@ -585,6 +585,11 @@ router.patch("/usuarios/:id/estado", requirePermission("mantenedores.admin", "ma
     const authzContext = await ensureCanWrite(req, res, "usuarios");
     if (!authzContext) return;
 
+    if (!toBool(nuevoEstado) && Number(req.authnClaims?.id_usuario) === id) {
+      res.status(400).json({ error: "No puedes desactivar tu propio usuario." });
+      return;
+    }
+
     const pool = await getPool();
     const result = await pool.request()
       .input("id", id)
@@ -634,8 +639,19 @@ router.post("/usuarios", requirePermission("mantenedores.admin", "mantenedores.e
     const passwordHash = await bcrypt.hash(password, 12);
     const now = new Date();
 
+    // ID explícito opcional (mismo contrato que el resto de mantenedores)
+    const rawExplicitId = req.body?.IdUsuario ?? req.body?.id_usuario;
+    const explicitId =
+      rawExplicitId === undefined || rawExplicitId === null || rawExplicitId === ""
+        ? null
+        : Number(rawExplicitId);
+    if (explicitId !== null && (!Number.isInteger(explicitId) || explicitId <= 0)) {
+      res.status(400).json({ error: "El ID de usuario debe ser un entero positivo." });
+      return;
+    }
+
     const pool = await getPool();
-    const insertResult = await pool.request()
+    const request = pool.request()
       .input("username", username)
       .input("email", email)
       .input("passwordHash", passwordHash)
@@ -643,14 +659,31 @@ router.post("/usuarios", requirePermission("mantenedores.admin", "mantenedores.e
       .input("apellido", apellido || null)
       .input("activo", activo !== undefined ? toBool(activo) : true)
       .input("createdAt", now)
-      .input("updatedAt", now)
-      .query(`
+      .input("updatedAt", now);
+
+    const insertCore = explicitId !== null
+      ? `
+        INSERT INTO [cfl].[Usuario]
+          (IdUsuario, Username, Email, PasswordHash, Nombre, Apellido, Activo, FechaCreacion, FechaActualizacion)
+        OUTPUT INSERTED.IdUsuario AS id
+        VALUES (@idUsuario, @username, @email, @passwordHash, @nombre, @apellido, @activo, @createdAt, @updatedAt);
+      `
+      : `
         INSERT INTO [cfl].[Usuario]
           (Username, Email, PasswordHash, Nombre, Apellido, Activo, FechaCreacion, FechaActualizacion)
         OUTPUT INSERTED.IdUsuario AS id
         VALUES (@username, @email, @passwordHash, @nombre, @apellido, @activo, @createdAt, @updatedAt);
-      `);
+      `;
 
+    if (explicitId !== null) {
+      request.input("idUsuario", explicitId);
+    }
+
+    const insertSql = explicitId !== null
+      ? `SET IDENTITY_INSERT [cfl].[Usuario] ON;\n${insertCore}\nSET IDENTITY_INSERT [cfl].[Usuario] OFF;`
+      : insertCore;
+
+    const insertResult = await request.query(insertSql);
     const insertedId = insertResult.recordset[0].id;
 
     // Asignar rol si se proveyó
@@ -1017,6 +1050,28 @@ router.post("/:entity", async (req, res, next) => {
       payload[entityConfig.timestamps.updated] = new Date();
     }
 
+    // ID explícito opcional: si el body trae la PK y es un entero válido,
+    // se incluye en el INSERT envuelto en IDENTITY_INSERT ON/OFF. Si no,
+    // la BD auto-asigna el siguiente valor IDENTITY.
+    // Aceptamos tanto la key Pascal (ej. IdEmpresa) como la variante snake
+    // (ej. id_empresa) porque el frontend usa snake_case en su config.
+    const idColumnSnake = entityConfig.idColumn
+      .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2')
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .toLowerCase();
+    const rawExplicitId = req.body?.[entityConfig.idColumn] ?? req.body?.[idColumnSnake];
+    const explicitId =
+      rawExplicitId === undefined || rawExplicitId === null || rawExplicitId === ""
+        ? null
+        : Number(rawExplicitId);
+    if (explicitId !== null && (!Number.isInteger(explicitId) || explicitId <= 0)) {
+      res.status(400).json({ error: `El ID '${entityConfig.idColumn}' debe ser un entero positivo.` });
+      return;
+    }
+    if (explicitId !== null) {
+      payload[entityConfig.idColumn] = explicitId;
+    }
+
     const fields = Object.keys(payload);
     const pool = await getPool();
     const request = pool.request();
@@ -1025,11 +1080,15 @@ router.post("/:entity", async (req, res, next) => {
       request.input(`p${index}`, payload[fieldName]);
     });
 
-    const insertSql = `
+    const insertCore = `
       INSERT INTO ${entityConfig.table} (${fields.map((field) => `[${field}]`).join(", ")})
       OUTPUT INSERTED.[${entityConfig.idColumn}] AS id
       VALUES (${fields.map((_, index) => `@p${index}`).join(", ")});
     `;
+
+    const insertSql = explicitId !== null
+      ? `SET IDENTITY_INSERT ${entityConfig.table} ON;\n${insertCore}\nSET IDENTITY_INSERT ${entityConfig.table} OFF;`
+      : insertCore;
 
     const insertResult = await request.query(insertSql);
     const insertedId = insertResult.recordset[0].id;

@@ -26,15 +26,19 @@ function toN(v, fallback = 0) {
 
 /**
  * Calcula montos neto, IVA y total a partir de un arreglo de movimientos.
- * Cada movimiento debe tener la propiedad `monto_aplicado` (o `MontoAplicado`).
- * @param {Array<{monto_aplicado?: number|string}>} movimientos
+ * El neto de cada movimiento es `monto_aplicado + monto_extra`.
+ *
+ * @param {Array<{monto_aplicado?: number|string, monto_extra?: number|string}>} movimientos
  * @returns {{ montoNeto: number, montoIva: number, montoTotal: number }}
  */
 function calcMontos(movimientos) {
-  const montoNeto = movimientos.reduce((s, m) => s + toN(m.monto_aplicado), 0)
-  const montoIva = Math.round(montoNeto * IVA_RATE * 100) / 100
-  const montoTotal = Math.round((montoNeto + montoIva) * 100) / 100
-  return { montoNeto, montoIva, montoTotal }
+  const montoNeto = movimientos.reduce(
+    (s, m) => s + toN(m.monto_aplicado) + toN(m.monto_extra),
+    0,
+  );
+  const montoIva = Math.round(montoNeto * IVA_RATE * 100) / 100;
+  const montoTotal = Math.round((montoNeto + montoIva) * 100) / 100;
+  return { montoNeto, montoIva, montoTotal };
 }
 
 /**

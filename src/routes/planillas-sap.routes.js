@@ -169,19 +169,14 @@ async function regenerateDocuments(transaction, idPlanilla) {
       cm.Codigo AS CuentaMayorCodigo,
       cf.IdProductor,
       prod.CodigoProveedor, prod.Nombre AS ProductorNombre,
-      EspecieNombre = (
-        SELECT TOP 1 esp.Glosa
-        FROM [cfl].[DetalleFlete] df
-        INNER JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
-        WHERE df.IdCabeceraFlete = cf.IdCabeceraFlete
-        ORDER BY COALESCE(df.Cantidad, 0) DESC, COALESCE(df.Peso, 0) DESC
-      ),
+      EspecieNombre = esp.Glosa,
       cf.MontoAplicado
     FROM [cfl].[CabeceraFlete] cf
     INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = cf.IdFactura
     LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
     LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
     LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
+    LEFT JOIN [cfl].[Especie] esp ON esp.IdEspecie = cf.IdEspecie
     WHERE cf.IdFactura IN (${facParams.join(',')})
       AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO', 'COMPLETADO')
     ORDER BY fac.NumeroFactura, cc.SapCodigo, cm.Codigo, prod.Nombre;
@@ -403,7 +398,7 @@ router.get('/movimientos', requirePermission("planillas.ver", "planillas.generar
         cf.IdCabeceraFlete,
         cf.IdFactura,
         fac.NumeroFactura,
-        cf.FechaSalida,
+        FechaSalida = CONVERT(VARCHAR(10), cf.FechaSalida, 23),
         cf.GuiaRemision AS NumeroGuia,
         cc.SapCodigo AS CentroCostoCodigo,
         cm.Codigo AS CuentaMayorCodigo,
@@ -412,18 +407,19 @@ router.get('/movimientos', requirePermission("planillas.ver", "planillas.generar
         prod.Nombre AS ProductorNombre,
         prod.CodigoProveedor,
         cf.MontoAplicado,
-        especie_nombre = (
-          SELECT TOP 1 esp.Glosa
-          FROM [cfl].[DetalleFlete] df
-          INNER JOIN [cfl].[Especie] esp ON esp.IdEspecie = df.IdEspecie
-          WHERE df.IdCabeceraFlete = cf.IdCabeceraFlete
-        ),
+        -- IMPORTANTE: especie_nombre viene de CabeceraFlete.IdEspecie
+        -- (fuente canónica, misma que usa /generar para armar el ocMap).
+        -- Antes se calculaba vía subquery a DetalleFlete, lo que divergía
+        -- cuando cabecera y primer detalle tenían especies distintas y hacía
+        -- que el ocMap no matchee al generar (OC caía a null).
+        esp.Glosa AS especie_nombre,
         tf.Nombre AS TipoFleteNombre
       FROM [cfl].[CabeceraFlete] cf
       INNER JOIN [cfl].[CabeceraFactura] fac ON fac.IdFactura = cf.IdFactura
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
       LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
       LEFT JOIN [cfl].[Productor] prod ON prod.IdProductor = cf.IdProductor
+      LEFT JOIN [cfl].[Especie] esp ON esp.IdEspecie = cf.IdEspecie
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       WHERE cf.IdFactura IN (${paramClauses.join(',')})
         AND UPPER(cf.Estado) IN ('FACTURADO', 'PREFACTURADO', 'COMPLETADO')
@@ -577,11 +573,15 @@ router.post('/generar', requirePermission("planillas.generar"), validate({ body:
       return;
     }
 
-    // Build OC lookup keyed by id_productor|especie
+    // Build OC lookup keyed por id_productor|especie-normalizada.
+    // Normalizamos en AMBOS extremos (trim + uppercase) para evitar que un
+    // espacio perdido o casing distinto haga que la OC no matchee al generar.
+    const normEspecie = (v) => String(v ?? '').trim().toUpperCase();
     const ocMap = {};
     if (productores_oc) {
       for (const p of productores_oc) {
-        const key = `${p.id_productor}|${p.especie || ''}`;
+        if (!p.orden_compra) continue;
+        const key = `${p.id_productor}|${normEspecie(p.especie)}`;
         ocMap[key] = { orden_compra: p.orden_compra, posicion_oc: p.posicion_oc || '10' };
       }
     }
@@ -790,7 +790,9 @@ router.post('/generar', requirePermission("planillas.generar"), validate({ body:
       for (const linea of creditLines) {
         lineNum++;
         totalLineas++;
-        const ocKey = `${linea.id_productor}|${linea.especie || ''}`;
+        const ocKey = `${linea.id_productor}|${normEspecie(linea.especie)}`;
+        // Fallback: si no matchea exacto, intenta sin especie (caso productor
+        // con una sola línea) — conserva compatibilidad histórica.
         const oc = ocMap[ocKey] || ocMap[`${linea.id_productor}|`] || {};
         await new sql.Request(transaction)
           .input('idDoc', sql.BigInt, idDoc)

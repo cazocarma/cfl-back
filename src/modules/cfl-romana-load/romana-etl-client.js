@@ -17,6 +17,57 @@ function num(record, name) {
   return Number(f(record, name) || 0) || 0;
 }
 
+/**
+ * Normaliza cualquier valor de fecha que llegue desde el ETL de Romana a un
+ * string ISO `YYYY-MM-DD`, que mssql acepta sin ambigüedad en columnas DATE.
+ *
+ * Casos detectados en producción:
+ *   - SAP/OData devuelve "09-02-2026" (DD-MM-YYYY chileno). El driver `sql.Date`
+ *     o `new Date(...)` lo interpreta como MM-DD-YYYY y termina persistiendo
+ *     `2026-09-02`. Raíz del bug de "fechas en septiembre en vez de febrero".
+ *   - También puede venir como "09/02/2026", "09.02.2026", "20260209",
+ *     ISO "2026-02-09[T...]", o Date object.
+ *   - `/Date(1234567890000)/` (Microsoft JSON date) — formato raro pero posible.
+ *
+ * Devuelve `null` si la entrada no se puede interpretar.
+ */
+function normalizeSapDate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
+  }
+  const s = String(value).trim();
+  if (!s) return null;
+
+  // Ya es ISO (con o sin hora).
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  // SAP compacto "YYYYMMDD".
+  const compact = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (compact) return `${compact[1]}-${compact[2]}-${compact[3]}`;
+
+  // DD[/.-]MM[/.-]YYYY (formato chileno / europeo).
+  const dmy = s.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4})$/);
+  if (dmy) {
+    const d = dmy[1].padStart(2, "0");
+    const m = dmy[2].padStart(2, "0");
+    return `${dmy[3]}-${m}-${d}`;
+  }
+
+  // /Date(ms)/ (Microsoft JSON).
+  const msDate = s.match(/^\/Date\((-?\d+)\)\/$/);
+  if (msDate) {
+    const d = new Date(Number(msDate[1]));
+    return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
+  }
+
+  // Último recurso: new Date(). Evitamos esto para inputs DD-MM-YYYY porque
+  // JS lo interpreta como MM-DD-YYYY.
+  const parsed = new Date(s);
+  return isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+}
+
 function splitHeaderAndDetail(records) {
   const headersMap = new Map();
   const details = [];
@@ -43,8 +94,8 @@ function splitHeaderAndDetail(records) {
         conductor: str(r, "Conductor", 80),
         creadoPor: str(r, "Ernam", 12),
         creadoPorNombre: str(r, "TextErnam", 80),
-        fechaCreacionSap: f(r, "Erdat") || null,
-        fechaModificacionSap: f(r, "Aedat") || null,
+        fechaCreacionSap: normalizeSapDate(f(r, "Erdat")),
+        fechaModificacionSap: normalizeSapDate(f(r, "Aedat")),
         ordenCompra: str(r, "Ebeln", 20),
         codigoProductor: str(r, "CampoProduc", 20),
         centro: str(r, "Werks", 10),
@@ -99,7 +150,7 @@ function splitHeaderAndDetail(records) {
         destino: str(r, "YwtBtfield49", 10),
         destinoDescripcion: str(r, "TextDest", 40),
         lineaProduccion: str(r, "YwtBtfield28", 20),
-        fechaCosecha: f(r, "YwtBtfield09") || null,
+        fechaCosecha: normalizeSapDate(f(r, "YwtBtfield09")),
         psa: str(r, "YwtBtfield18", 20),
         ggn: str(r, "YwtBtfield19", 20),
         sdp: str(r, "YwtBtfield52", 10),

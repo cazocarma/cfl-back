@@ -319,9 +319,14 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
     });
     const { idCentroCosto, idCuentaMayor, idImputacionFlete } = imputacion;
 
-    if (!idCentroCosto) {
+    // Defensa en profundidad: resolveImputacionFlete ya lanza error dominio
+    // si no puede resolver una imputación completa. Este check nunca debería
+    // disparar, pero garantiza invariantes antes del INSERT/UPDATE.
+    if (!idCentroCosto || !idCuentaMayor || !idImputacionFlete) {
       await transaction.rollback();
-      res.status(422).json({ error: "No se pudo resolver id_centro_costo para la cabecera de flete" });
+      res.status(422).json({
+        error: "No se pudo resolver la imputación completa del flete (tipo + centro + cuenta).",
+      });
       return;
     }
 
@@ -489,9 +494,14 @@ router.put("/:id_cabecera_flete", requirePermission("fletes.editar"), validate({
     });
     const { idCentroCosto, idCuentaMayor, idImputacionFlete } = imputacion;
 
-    if (!idCentroCosto) {
+    // Defensa en profundidad: resolveImputacionFlete ya lanza error dominio
+    // si no puede resolver una imputación completa. Este check nunca debería
+    // disparar, pero garantiza invariantes antes del INSERT/UPDATE.
+    if (!idCentroCosto || !idCuentaMayor || !idImputacionFlete) {
       await transaction.rollback();
-      res.status(422).json({ error: "No se pudo resolver id_centro_costo para la cabecera de flete" });
+      res.status(422).json({
+        error: "No se pudo resolver la imputación completa del flete (tipo + centro + cuenta).",
+      });
       return;
     }
 
@@ -500,6 +510,7 @@ router.put("/:id_cabecera_flete", requirePermission("fletes.editar"), validate({
     const numeroEntrega = parsed.numeroEntrega ?? (existing.NumeroEntrega ? String(existing.NumeroEntrega) : null);
     const sentidoFlete = parsed.sentidoFlete ?? (existing.SentidoFlete ? String(existing.SentidoFlete) : null);
     const estado = deriveLifecycleStatus({
+      currentStatus: estadoActual,
       requestedStatus: parsed.requestedStatus,
       idTipoFlete: parsed.idTipoFlete,
       idCentroCosto,

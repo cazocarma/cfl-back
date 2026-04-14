@@ -1,6 +1,8 @@
 const { z } = require("zod");
 
 const crearUsuarioBody = z.object({
+  IdUsuario: z.coerce.number().int().positive().optional().nullable(),
+  id_usuario: z.coerce.number().int().positive().optional().nullable(),
   username: z.string().trim().min(1).max(100),
   email: z.string().trim().min(1).max(255).email("Formato de email invalido"),
   password: z.string().min(8, "Minimo 8 caracteres").max(128),

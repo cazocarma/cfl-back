@@ -169,18 +169,21 @@ async function fetchAuthzContextByUsername(username) {
   return authzContext;
 }
 
+/**
+ * Resuelve el contexto de autorización del usuario autenticado.
+ *
+ * Regla de seguridad: SOLO se resuelve por id_usuario. Si el usuario no existe
+ * o está desactivado (`Activo = 0`), retorna null y el consumidor debe rechazar
+ * la petición (403). No hay fallback por rol del JWT: un JWT con role pero con
+ * usuario desactivado debe ser tratado como no autorizado — de lo contrario
+ * un usuario dado de baja mantendría permisos hasta que expire el token.
+ */
 async function resolveAuthzContext(req) {
-  if (!req.authnClaims) {
+  if (!req.authnClaims?.id_usuario) {
     return null;
   }
 
-  const byAuthnUser = await fetchAuthzContextByUserId(req.authnClaims.id_usuario);
-  if (byAuthnUser) return byAuthnUser;
-
-  const byAuthnRole = await fetchAuthzContextByRoleName(req.authnClaims.role);
-  if (byAuthnRole) return byAuthnRole;
-
-  return null;
+  return fetchAuthzContextByUserId(req.authnClaims.id_usuario);
 }
 
 function hasPermission(authzContext, permissionKey) {

@@ -18,7 +18,12 @@ const fleteManualBody = z.object({
     tipo_movimiento: z.string().max(50).optional().nullable(),
     estado: z.string().max(30).optional().nullable(),
     fecha_salida: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Formato fecha: YYYY-MM-DD"),
-    hora_salida: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, "Formato hora: HH:MM o HH:MM:SS"),
+    hora_salida: z
+      .string()
+      .regex(
+        /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/,
+        "Hora inválida: usa HH:MM o HH:MM:SS con rangos 00-23 y 00-59",
+      ),
     monto_aplicado: z.coerce.number().min(0, "Monto no puede ser negativo").optional().nullable(),
     monto_extra: z.coerce.number().min(0, "Monto extra no puede ser negativo").optional().nullable(),
     guia_remision: z.string().max(25).optional().nullable(),

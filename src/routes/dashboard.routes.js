@@ -251,12 +251,12 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         ProductorCodigoProveedor = prod.CodigoProveedor,
         ProductorRut = prod.Rut,
         ProductorNombre = prod.Nombre,
-        SapFechaSalida = lk.SapFechaSalida,
-        FechaReferencia = COALESCE(
+        SapFechaSalida = CONVERT(VARCHAR(10), lk.SapFechaSalida, 23),
+        FechaReferencia = CONVERT(VARCHAR(10), COALESCE(
           CASE WHEN lk.SapFechaSalida > '1900-01-01' THEN lk.SapFechaSalida END,
           CASE WHEN lk.SapFechaEntregaReal > '1900-01-01' THEN lk.SapFechaEntregaReal END,
           CAST(e.FechaCreacion AS DATE)
-        ),
+        ), 23),
         SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
         SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
         SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
@@ -713,9 +713,11 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     const idCuentaMayor = imputacion.idCuentaMayor;
     const idImputacionFlete = imputacion.idImputacionFlete;
 
-    if (!idCentroCosto) {
+    if (!idCentroCosto || !idCuentaMayor || !idImputacionFlete) {
       await transaction.rollback();
-      res.status(422).json({ error: "No se pudo resolver id_centro_costo" });
+      res.status(422).json({
+        error: "No se pudo resolver la imputación completa del flete (tipo + centro + cuenta).",
+      });
       return;
     }
 
@@ -877,13 +879,13 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", requirePermission("f
         ProductorRut = prod.Rut,
         ProductorNombre = prod.Nombre,
         ProductorEmail = prod.Email,
-        SapFechaSalida = lk.SapFechaSalida,
-        SapFechaEntregaReal = lk.SapFechaEntregaReal,
-        FechaReferencia = COALESCE(
+        SapFechaSalida = CONVERT(VARCHAR(10), lk.SapFechaSalida, 23),
+        SapFechaEntregaReal = CONVERT(VARCHAR(10), lk.SapFechaEntregaReal, 23),
+        FechaReferencia = CONVERT(VARCHAR(10), COALESCE(
           CASE WHEN lk.SapFechaSalida > '1900-01-01' THEN lk.SapFechaSalida END,
           CASE WHEN lk.SapFechaEntregaReal > '1900-01-01' THEN lk.SapFechaEntregaReal END,
           CAST(e.FechaCreacion AS DATE)
-        ),
+        ), 23),
         SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
         SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
         SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
@@ -1751,9 +1753,11 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
     const idCentroCosto = imputacion.idCentroCosto;
     const idCuentaMayor = imputacion.idCuentaMayor;
     const idImputacionFlete = imputacion.idImputacionFlete;
-    if (!idCentroCosto) {
+    if (!idCentroCosto || !idCuentaMayor || !idImputacionFlete) {
       await transaction.rollback();
-      res.status(422).json({ error: "No se pudo resolver id_centro_costo para la cabecera de flete" });
+      res.status(422).json({
+        error: "No se pudo resolver la imputación completa del flete (tipo + centro + cuenta).",
+      });
       return;
     }
 
@@ -2155,10 +2159,10 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
     const idCuentaMayor = imputacion.idCuentaMayor || null;
     const idImputacionFlete = imputacion.idImputacionFlete || null;
 
-    if (!idCentroCosto) {
+    if (!idCentroCosto || !idCuentaMayor || !idImputacionFlete) {
       await transaction.rollback();
       res.status(422).json({
-        error: "No se pudo resolver id_centro_costo para la cabecera de flete",
+        error: "No se pudo resolver la imputación completa del flete (tipo + centro + cuenta).",
       });
       return;
     }

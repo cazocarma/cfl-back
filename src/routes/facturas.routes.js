@@ -54,8 +54,9 @@ async function computePreview(pool, idEmpresa, grupos) {
         cf.NumeroEntrega,
         cf.GuiaRemision,
         cf.TipoMovimiento,
-        cf.FechaSalida,
+        FechaSalida = CONVERT(VARCHAR(10), cf.FechaSalida, 23),
         cf.MontoAplicado,
+        cf.MontoExtra,
         cf.IdTipoFlete,
         tf.nombre  AS tipo_flete_nombre,
         tf.SapCodigo AS tipo_flete_codigo,
@@ -140,7 +141,7 @@ async function fetchFactura(pool, idFactura) {
         empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
         emp.rut AS empresa_rut,
         fac.NumeroFactura,
-        fac.FechaEmision,
+        FechaEmision = CONVERT(VARCHAR(10), fac.FechaEmision, 23),
         fac.moneda,
         fac.MontoNeto,
         fac.MontoIva,
@@ -171,8 +172,9 @@ async function fetchFactura(pool, idFactura) {
         cf.TipoMovimiento,
         cf.SentidoFlete,
         cf.estado,
-        cf.FechaSalida,
+        FechaSalida = CONVERT(VARCHAR(10), cf.FechaSalida, 23),
         cf.MontoAplicado,
+        cf.MontoExtra,
         cf.IdTipoFlete,
         tipo_flete_nombre  = tf.nombre,
         tipo_flete_codigo  = tf.SapCodigo,
@@ -355,7 +357,7 @@ router.get('/periodos-con-movimientos', requirePermission("facturas.ver", "factu
           YEAR(cf.FechaSalida)  AS anio,
           MONTH(cf.FechaSalida) AS mes,
           COUNT_BIG(cf.IdCabeceraFlete) AS total_movimientos,
-          COALESCE(SUM(cf.MontoAplicado), 0) AS monto_neto
+          COALESCE(SUM(cf.MontoAplicado + COALESCE(cf.MontoExtra, 0)), 0) AS monto_neto
         FROM [cfl].[CabeceraFlete] cf
         INNER JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
         WHERE mv.IdEmpresaTransporte = @idEmpresa
@@ -407,8 +409,9 @@ router.get('/movimientos-elegibles', requirePermission("facturas.ver", "facturas
         cf.IdCentroCosto,
         cc.nombre  AS centro_costo,
         cc.SapCodigo AS centro_costo_codigo,
-        cf.FechaSalida,
-        cf.MontoAplicado
+        FechaSalida = CONVERT(VARCHAR(10), cf.FechaSalida, 23),
+        cf.MontoAplicado,
+        cf.MontoExtra
       FROM [cfl].[CabeceraFlete] cf
       INNER JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
@@ -451,7 +454,7 @@ router.get('/movimientos-elegibles', requirePermission("facturas.ver", "facturas
 // POST /facturas/preview
 // Calcula cuántas facturas se generarán antes de confirmar
 // ---------------------------------------------------------------------------
-router.post('/preview', requirePermission("facturas.ver", "facturas.editar"), validate({ body: previewBody }), async (req, res, next) => {
+router.post('/preview', requirePermission("facturas.editar"), validate({ body: previewBody }), async (req, res, next) => {
   const { id_empresa, grupos } = req.body;
 
   if (!id_empresa || !Array.isArray(grupos) || grupos.length === 0) {
@@ -623,7 +626,7 @@ router.get('/', requirePermission("facturas.ver", "facturas.editar", "facturas.c
         fac.IdEmpresa,
         empresa_nombre = COALESCE(NULLIF(LTRIM(RTRIM(emp.RazonSocial)), ''), CONCAT('Empresa #', fac.IdEmpresa)),
         fac.NumeroFactura,
-        fac.FechaEmision,
+        FechaEmision = CONVERT(VARCHAR(10), fac.FechaEmision, 23),
         fac.moneda,
         fac.MontoNeto,
         fac.MontoIva,
@@ -1025,12 +1028,17 @@ router.get('/:id/export/excel', requirePermission("facturas.ver", "facturas.edit
       { header: 'Patente',          key: 'camion_patente',       width: 12 },
       { header: 'Tipo Camión',      key: 'tipo_camion',          width: 18 },
       { header: 'Fecha Salida',     key: 'fecha_salida',         width: 14 },
-      { header: 'Monto',            key: 'monto_aplicado',       width: 15 },
+      { header: 'Monto Aplicado',   key: 'monto_aplicado',       width: 15 },
+      { header: 'Monto Extra',      key: 'monto_extra',          width: 15 },
+      { header: 'Monto Total',      key: 'monto_total_linea',    width: 15 },
     ];
     shDet.getRow(1).font = { bold: true };
 
     let total = 0;
     for (const m of factura.movimientos) {
+      const aplicado = Number(m.monto_aplicado) || 0;
+      const extra = Number(m.monto_extra) || 0;
+      const lineaTotal = aplicado + extra;
       shDet.addRow({
         guia_remision:      m.guia_remision || m.sap_numero_entrega || '-',
         sap_numero_entrega: m.sap_numero_entrega || '-',
@@ -1044,13 +1052,15 @@ router.get('/:id/export/excel', requirePermission("facturas.ver", "facturas.edit
         camion_patente:     m.camion_patente || '-',
         tipo_camion:        m.tipo_camion || '-',
         fecha_salida:       m.fecha_salida,
-        monto_aplicado:     Number(m.monto_aplicado) || 0,
+        monto_aplicado:     aplicado,
+        monto_extra:        extra,
+        monto_total_linea:  lineaTotal,
       });
-      total += Number(m.monto_aplicado) || 0;
+      total += lineaTotal;
     }
 
     // Fila de total
-    const totRow = shDet.addRow({ centro_costo: 'TOTAL', monto_aplicado: total });
+    const totRow = shDet.addRow({ centro_costo: 'TOTAL', monto_total_linea: total });
     totRow.font = { bold: true };
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1092,7 +1102,7 @@ async function recalcularMontos(transaction, idFactura, now) {
   const res = await new sql.Request(transaction)
     .input('idFactura', sql.BigInt, idFactura)
     .query(`
-      SELECT COALESCE(SUM(cf.MontoAplicado), 0) AS MontoNeto
+      SELECT COALESCE(SUM(cf.MontoAplicado + COALESCE(cf.MontoExtra, 0)), 0) AS MontoNeto
       FROM [cfl].[CabeceraFlete] cf
       WHERE cf.IdFactura = @idFactura;
     `);
