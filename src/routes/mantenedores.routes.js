@@ -822,6 +822,38 @@ router.post("/productores/sync-sap", requirePermission("mantenedores.admin"), as
   }
 });
 
+router.post("/choferes/sync-sap", requirePermission("mantenedores.admin"), async (req, res, next) => {
+  try {
+    const { syncChoferes } = require("../modules/sap-sync/sync-transport-catalogs");
+    const result = await syncChoferes();
+
+    req.auditContext = { entity: "mantenedores.choferes", action: "sync-sap" };
+
+    res.json({
+      message: `Sincronizacion completada: ${result.inserted} nuevos, ${result.updated} actualizados, ${result.unchanged} sin cambios`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/camiones/sync-sap", requirePermission("mantenedores.admin"), async (req, res, next) => {
+  try {
+    const { syncCamiones } = require("../modules/sap-sync/sync-transport-catalogs");
+    const result = await syncCamiones();
+
+    req.auditContext = { entity: "mantenedores.camiones", action: "sync-sap" };
+
+    res.json({
+      message: `Sincronizacion completada: ${result.inserted} nuevos, ${result.updated} actualizados, ${result.unchanged} sin cambios`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/resumen", requirePermission("mantenedores.view"), async (req, res, next) => {
   try {
     const authzContext = req.authzContext;

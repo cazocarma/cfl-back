@@ -26,6 +26,7 @@ function buildMissingDeliveriesQuery(filters) {
     "NOT EXISTS (SELECT 1 FROM [cfl].[FleteSapEntrega] fe WHERE fe.IdSapEntrega = c.IdSapEntrega)",
     "NOT EXISTS (SELECT 1 FROM [cfl].[SapEntregaDescarte] sd WHERE sd.IdSapEntrega = c.IdSapEntrega AND sd.Activo = 1)",
     "c.SapGuiaRemision IS NOT NULL",
+    "NOT (c.OrigenDatos = 'DESPACHO' AND ISNULL(c.TipoFleteActivo, 1) = 0)",
   ];
 
   if (filters.search) {
@@ -55,6 +56,44 @@ function buildMissingDeliveriesQuery(filters) {
     FROM #candidates c
     WHERE ${whereClauses.join(" AND ")}
   `;
+}
+
+function isActiveFlag(value) {
+  return value === true || value === 1 || value === "1";
+}
+
+async function findSapTipoFleteConfig(executor, sapTipoFlete) {
+  const tipoCodigo = toNullableTrimmedString(sapTipoFlete);
+  if (!tipoCodigo) return null;
+
+  const request = typeof executor?.request === "function"
+    ? executor.request()
+    : new sql.Request(executor);
+
+  const result = await request
+    .input("sapCodigoTipoFlete", sql.VarChar(20), tipoCodigo)
+    .query(`
+      SELECT TOP 1
+        IdTipoFlete,
+        Activo
+      FROM [cfl].[TipoFlete]
+      WHERE SapCodigo = @sapCodigoTipoFlete
+      ORDER BY CASE WHEN Activo = 1 THEN 0 ELSE 1 END, IdTipoFlete ASC;
+    `);
+
+  const row = result.recordset[0] || null;
+  if (!row) return null;
+
+  return {
+    idTipoFlete: Number(row.IdTipoFlete || 0) || null,
+    activo: isActiveFlag(row.Activo),
+    sapCodigo: tipoCodigo,
+  };
+}
+
+async function isSapTipoFleteInactive(executor, sapTipoFlete) {
+  const config = await findSapTipoFleteConfig(executor, sapTipoFlete);
+  return Boolean(config && !config.activo);
 }
 
 
@@ -99,17 +138,8 @@ async function resolveSapImputacionContext(transaction, {
     };
   }
 
-  const tipoResult = await new sql.Request(transaction)
-    .input("sapCodigoTipoFlete", sql.VarChar(20), tipoCodigo)
-    .query(`
-      SELECT TOP 1
-        IdTipoFlete
-      FROM [cfl].[TipoFlete]
-      WHERE SapCodigo = @sapCodigoTipoFlete
-      ORDER BY CASE WHEN Activo = 1 THEN 0 ELSE 1 END, IdTipoFlete ASC;
-    `);
-
-  const idTipoFlete = Number(tipoResult.recordset[0]?.IdTipoFlete || 0) || null;
+  const tipoConfig = await findSapTipoFleteConfig(transaction, tipoCodigo);
+  const idTipoFlete = tipoConfig?.activo ? tipoConfig.idTipoFlete : null;
   if (!idTipoFlete) {
     return {
       idTipoFlete: null,
@@ -270,6 +300,7 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
 
         IdTipoFlete = tf.IdTipoFlete,
         tipo_flete_nombre = tf.Nombre,
+        TipoFleteActivo = CAST(tf.Activo AS BIT),
         IdImputacionFlete = COALESCE(
           im_direct.IdImputacionFlete,
           CASE WHEN im_default.CntActivas = 1 THEN im_default.IdImputacionFlete ELSE NULL END
@@ -410,6 +441,7 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         lk.SapPesoNeto,
         tf.IdTipoFlete,
         tf.Nombre,
+        tf.Activo,
         cc_sap.IdCentroCosto,
         cm_sap.IdCuentaMayor,
         im_direct.IdImputacionFlete,
@@ -431,7 +463,7 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         SapEmpresaTransporte, SapNombreChofer, SapPatente, SapCarro,
         SapPesoTotal, SapPesoNeto,
         posiciones_total, cantidad_entregada_total,
-        IdTipoFlete, tipo_flete_nombre,
+        IdTipoFlete, tipo_flete_nombre, TipoFleteActivo,
         IdImputacionFlete, IdCentroCosto, IdCuentaMayor,
         Estado, puede_ingresar, motivo_no_ingreso,
         FechaUltimaVista, FechaActualizacion,
@@ -452,7 +484,7 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         COALESCE(SUM(rd.PesoReal), 0), 0,
         COUNT(rd.Posicion),
         COALESCE(SUM(rd.PesoReal), 0),
-        NULL, NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL, NULL,
         'DETECTADO',
         CAST(CASE WHEN rc.GuiaDespacho IS NOT NULL AND rc.FechaCreacionSap IS NOT NULL THEN 1 ELSE 0 END AS BIT),
         CASE WHEN rc.GuiaDespacho IS NULL THEN 'Falta Guia' WHEN rc.FechaCreacionSap IS NULL THEN 'Falta Fecha' ELSE NULL END,
@@ -893,12 +925,15 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", requirePermission("f
         SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
         SapPesoTotal = lk.SapPesoTotal,
         SapPesoNeto = lk.SapPesoNeto,
+        TipoFleteActivo = CAST(tf.Activo AS BIT),
         e.FechaUltimaVista,
         e.FechaActualizacion
       FROM [cfl].[SapEntrega] e
       LEFT JOIN [cfl].[VW_LikpActual] lk
         ON lk.SapNumeroEntrega = e.SapNumeroEntrega
        AND lk.SistemaFuente = e.SistemaFuente
+      LEFT JOIN [cfl].[TipoFlete] tf
+        ON tf.SapCodigo = lk.SapCodigoTipoFlete
       OUTER APPLY (
         SELECT TOP 1
           p.IdProductor,
@@ -923,6 +958,14 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", requirePermission("f
       res.status(404).json({ error: "Entrega SAP no encontrada" });
       return;
     }
+    if (cabecera.TipoFleteActivo === 0 || cabecera.TipoFleteActivo === false) {
+      res.status(404).json({
+        error: "La entrega SAP corresponde a un tipo de flete desactivado y no esta disponible en la bandeja",
+      });
+      return;
+    }
+    delete cabecera.TipoFleteActivo;
+    delete cabecera.tipo_flete_activo;
 
     const positionsResult = await pool
       .request()
@@ -1021,6 +1064,7 @@ router.get("/fletes/completados", requirePermission("fletes.candidatos.view"), a
         ProductorEmail = COALESCE(prod_cf.Email, prod_sap.Email),
         cf.SentidoFlete,
         tf.Nombre AS tipo_flete_nombre,
+        tipo_flete_activo = tf.Activo,
         cf.IdCentroCosto,
         cc.Nombre AS centro_costo_nombre,
         det.total_detalles,
@@ -1184,6 +1228,7 @@ router.get("/fletes/completados", requirePermission("fletes.candidatos.view"), a
         )
         AND (@fechaDesde IS NULL OR FechaSalida >= CAST(@fechaDesde AS DATE))
         AND (@fechaHasta IS NULL OR FechaSalida <= CAST(@fechaHasta AS DATE))
+        AND (IdTipoFlete IS NULL OR ISNULL(tipo_flete_activo, 1) = 1)
       ORDER BY ${orderClause}
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
     `;
@@ -1338,9 +1383,12 @@ router.post("/fletes/no-ingresados/descartar-todos", requirePermission("fletes.s
         INNER JOIN [cfl].[SapEntrega] e ON e.IdSapEntrega = sd.IdSapEntrega
         INNER JOIN [cfl].[VW_LikpActual] lk
           ON lk.SapNumeroEntrega = e.SapNumeroEntrega AND lk.SistemaFuente = e.SistemaFuente
+        LEFT JOIN [cfl].[TipoFlete] tf
+          ON tf.SapCodigo = lk.SapCodigoTipoFlete
         WHERE sd.Activo = 0
           AND NOT EXISTS (SELECT 1 FROM [cfl].[FleteSapEntrega] fe WHERE fe.IdSapEntrega = e.IdSapEntrega)
-          AND NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), '') IS NOT NULL;
+          AND NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), '') IS NOT NULL
+          AND ISNULL(tf.Activo, 1) = 1;
         SELECT reactivated = @@ROWCOUNT;
       `);
 
@@ -1356,9 +1404,12 @@ router.post("/fletes/no-ingresados/descartar-todos", requirePermission("fletes.s
         FROM [cfl].[SapEntrega] e
         INNER JOIN [cfl].[VW_LikpActual] lk
           ON lk.SapNumeroEntrega = e.SapNumeroEntrega AND lk.SistemaFuente = e.SistemaFuente
+        LEFT JOIN [cfl].[TipoFlete] tf
+          ON tf.SapCodigo = lk.SapCodigoTipoFlete
         WHERE NOT EXISTS (SELECT 1 FROM [cfl].[FleteSapEntrega] fe WHERE fe.IdSapEntrega = e.IdSapEntrega)
           AND NOT EXISTS (SELECT 1 FROM [cfl].[SapEntregaDescarte] sd WHERE sd.IdSapEntrega = e.IdSapEntrega)
-          AND NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), '') IS NOT NULL;
+          AND NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), '') IS NOT NULL
+          AND ISNULL(tf.Activo, 1) = 1;
         SELECT inserted = @@ROWCOUNT;
       `);
 
@@ -1827,8 +1878,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
       return;
     }
 
-    const sapCuentaMayor = toNullableTrimmedString(entrega.sap_cuenta_mayor);
     const sapTipoFlete = toNullableTrimmedString(entrega.sap_codigo_tipo_flete);
+    if (await isSapTipoFleteInactive(transaction, sapTipoFlete)) {
+      await transaction.rollback();
+      res.status(409).json({
+        error: `La entrega SAP corresponde a un tipo de flete desactivado (${sapTipoFlete}) y no se puede crear`,
+      });
+      return;
+    }
+    const sapCuentaMayor = toNullableTrimmedString(entrega.sap_cuenta_mayor);
     const sapCentroCosto = toNullableTrimmedString(entrega.sap_centro_costo);
     const tipoFleteCanonicalResult = await new sql.Request(transaction)
       .input("idTipoFlete", sql.BigInt, idTipoFlete)
@@ -2135,6 +2193,13 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
       await transaction.rollback();
       res.status(422).json({
         error: "La entrega no tiene sap_codigo_tipo_flete y no se puede crear la cabecera",
+      });
+      return;
+    }
+    if (await isSapTipoFleteInactive(transaction, sapTipoFlete)) {
+      await transaction.rollback();
+      res.status(409).json({
+        error: `La entrega SAP corresponde a un tipo de flete desactivado (${sapTipoFlete}) y no se puede ingresar`,
       });
       return;
     }
