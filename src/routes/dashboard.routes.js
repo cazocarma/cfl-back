@@ -911,13 +911,9 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", requirePermission("f
         ProductorRut = prod.Rut,
         ProductorNombre = prod.Nombre,
         ProductorEmail = prod.Email,
+        SapFechaCreacion = CONVERT(VARCHAR(10), lk.SapFechaCreacion, 23),
         SapFechaSalida = CONVERT(VARCHAR(10), lk.SapFechaSalida, 23),
         SapFechaEntregaReal = CONVERT(VARCHAR(10), lk.SapFechaEntregaReal, 23),
-        FechaReferencia = CONVERT(VARCHAR(10), COALESCE(
-          CASE WHEN lk.SapFechaSalida > '1900-01-01' THEN lk.SapFechaSalida END,
-          CASE WHEN lk.SapFechaEntregaReal > '1900-01-01' THEN lk.SapFechaEntregaReal END,
-          CAST(e.FechaCreacion AS DATE)
-        ), 23),
         SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
         SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
         SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
@@ -2139,7 +2135,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
         lk.SapCuentaMayor,
         lk.SapGuiaRemision,
         lk.SapDestinatario,
-        CONVERT(VARCHAR(10), lk.SapFechaSalida, 23) AS sap_fecha_salida_iso,
+        CONVERT(VARCHAR(10), lk.SapFechaCreacion, 23) AS sap_fecha_creacion_iso,
         CONVERT(VARCHAR(8), lk.SapHoraSalida, 108) AS sap_hora_salida_iso
       FROM [cfl].[SapEntrega] e
       LEFT JOIN [cfl].[VW_LikpActual] lk
@@ -2232,8 +2228,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
       return;
     }
 
-    const fechaSalida = delivery.sap_fecha_salida_iso || now.toISOString().slice(0, 10);
-    const horaSalida = delivery.sap_hora_salida_iso || now.toISOString().slice(11, 19);
+    const fechaSalida = delivery.sap_fecha_creacion_iso;
+    if (!fechaSalida) {
+      await transaction.rollback();
+      res.status(422).json({
+        error: "La entrega SAP no tiene SapFechaCreacion; no se puede crear la cabecera",
+      });
+      return;
+    }
+    const horaSalida = delivery.sap_hora_salida_iso || "00:00:00";
 
     const insertCabeceraRequest = new sql.Request(transaction);
     // cuenta_mayor_final eliminado; la cuenta contable final se gestiona via id_cuenta_mayor (FK)
