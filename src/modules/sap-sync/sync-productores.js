@@ -69,7 +69,7 @@ async function syncProductores() {
 
   logger.info("Iniciando sincronizacion de productores desde SAP OData");
 
-  const records = await queryOdata(destination, ODATA_ENTITY_SET);
+  const records = await queryOdata(destination, ODATA_ENTITY_SET, { top: 10000 });
 
   if (!records || records.length === 0) {
     logger.info("SAP OData no devolvio registros de productores");
