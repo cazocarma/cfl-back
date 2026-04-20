@@ -940,8 +940,9 @@ router.get("/:entity", async (req, res, next) => {
       // "todos" → sin filtro
     }
     const maxRows = 5000; // limite de seguridad para evitar DoS
+    const topClause = entityConfig.unlimited ? "" : `TOP ${maxRows} `;
     const sql = `
-      SELECT TOP ${maxRows} ${entityConfig.listColumns.join(", ")}
+      SELECT ${topClause}${entityConfig.listColumns.join(", ")}
       FROM ${buildBaseFrom(entityConfig)}
       ${activeFilter}
       ORDER BY ${entityConfig.orderBy};
