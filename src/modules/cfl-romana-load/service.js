@@ -14,16 +14,39 @@ class CflRomanaLoadService {
     return this._execute(JOB_TYPE.DATE_RANGE, () => extractByDateRange(centro, fechaDesde, fechaHasta));
   }
 
-  async createNPartidaJob({ centro, nPartida, authnClaims }) {
+  async createNPartidaJob({ centro, nPartida, fechaReferencia, authnClaims }) {
     if (!centro) throw buildDomainError("centro es requerido", 400);
     if (!nPartida) throw buildDomainError("n_partida es requerido", 400);
-    return this._execute(JOB_TYPE.NPARTIDA, () => extractByNPartida(centro, String(nPartida).trim()));
+    const fecha = this._validateFechaReferencia(fechaReferencia);
+    return this._execute(JOB_TYPE.NPARTIDA, () => extractByNPartida(centro, String(nPartida).trim(), fecha));
   }
 
-  async createGuiaJob({ centro, guia, authnClaims }) {
+  async createGuiaJob({ centro, guia, fechaReferencia, authnClaims }) {
     if (!centro) throw buildDomainError("centro es requerido", 400);
     if (!guia) throw buildDomainError("guia es requerida", 400);
-    return this._execute("GUIA", () => extractByGuiaDespacho(centro, String(guia).trim()));
+    const fecha = this._validateFechaReferencia(fechaReferencia);
+    return this._execute("GUIA", () => extractByGuiaDespacho(centro, String(guia).trim(), fecha));
+  }
+
+  _validateFechaReferencia(value) {
+    if (!value) throw buildDomainError("fecha_referencia es requerida", 400);
+    const s = String(value).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+      throw buildDomainError("fecha_referencia debe tener formato YYYY-MM-DD", 400);
+    }
+    const ref = new Date(`${s}T00:00:00`);
+    if (isNaN(ref.getTime())) throw buildDomainError("fecha_referencia inválida", 400);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    if (ref.getTime() > today.getTime()) {
+      throw buildDomainError("fecha_referencia no puede ser futura", 400);
+    }
+    const maxPast = new Date(today);
+    maxPast.setFullYear(today.getFullYear() - 2);
+    if (ref.getTime() < maxPast.getTime()) {
+      throw buildDomainError("fecha_referencia no puede ser anterior a 2 años", 400);
+    }
+    return s;
   }
 
   async _execute(jobType, extractFn) {

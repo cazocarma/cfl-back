@@ -185,15 +185,43 @@ async function extractByDateRange(centro, fromDate, toDate) {
   return splitHeaderAndDetail(records || []);
 }
 
-async function extractByNPartida(centro, nPartida) {
-  const filter = `Werks eq '${centro}' and NPartida eq '${nPartida}'`;
+// Guia no es campo indexado en el CDS de romana → sin acotar por Erdat SAP
+// escanea todo el histórico del Werks y la consulta se va a timeout. Obligamos
+// una fecha de referencia y consultamos una ventana estrecha alrededor.
+const ROMANA_WINDOW_DAYS = 1;
+
+function buildReferenceWindow(fechaReferencia, days = ROMANA_WINDOW_DAYS) {
+  const ref = new Date(`${fechaReferencia}T00:00:00`);
+  if (isNaN(ref.getTime())) {
+    throw new Error(`fecha_referencia inválida: ${fechaReferencia}`);
+  }
+  const from = new Date(ref);
+  from.setDate(ref.getDate() - days);
+  const to = new Date(ref);
+  to.setDate(ref.getDate() + days);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  return { fromDate: fmt(from), toDate: fmt(to) };
+}
+
+async function extractByNPartida(centro, nPartida, fechaReferencia) {
+  const { fromDate, toDate } = buildReferenceWindow(fechaReferencia);
+  const filter =
+    `Werks eq '${centro}' ` +
+    `and Erdat ge datetime'${fromDate}T00:00:00' ` +
+    `and Erdat le datetime'${toDate}T23:59:59' ` +
+    `and NPartida eq '${nPartida}'`;
   logger.info({ filter }, "Consultando Romana OData por N° partida");
   const records = await queryOdata(ODATA_DESTINATION, ODATA_ENTITY_SET, { filter });
   return splitHeaderAndDetail(records || []);
 }
 
-async function extractByGuiaDespacho(centro, guia) {
-  const filter = `Werks eq '${centro}' and Guia eq '${guia}'`;
+async function extractByGuiaDespacho(centro, guia, fechaReferencia) {
+  const { fromDate, toDate } = buildReferenceWindow(fechaReferencia);
+  const filter =
+    `Werks eq '${centro}' ` +
+    `and Erdat ge datetime'${fromDate}T00:00:00' ` +
+    `and Erdat le datetime'${toDate}T23:59:59' ` +
+    `and Guia eq '${guia}'`;
   logger.info({ filter }, "Consultando Romana OData por guía de despacho");
   const records = await queryOdata(ODATA_DESTINATION, ODATA_ENTITY_SET, { filter });
   return splitHeaderAndDetail(records || []);
