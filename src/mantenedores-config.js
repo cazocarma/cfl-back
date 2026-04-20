@@ -284,6 +284,7 @@ const MAINTAINERS = {
     alias: "t",
     idColumn: "IdProductor",
     orderBy: "t.Nombre ASC",
+    unlimited: true,
     listColumns: [
       "t.IdProductor",
       "t.CodigoProveedor",
