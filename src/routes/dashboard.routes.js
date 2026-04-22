@@ -18,6 +18,7 @@ const {
   resolveMovilId,
   resolveImputacionFlete,
 } = require("../helpers");
+const { applyTransportIntent } = require("../modules/cfl-flete-save-pipeline");
 
 const router = express.Router();
 
@@ -30,13 +31,19 @@ function buildMissingDeliveriesQuery(filters) {
   ];
 
   if (filters.search) {
-    // Soporta búsqueda por entrega, guia, empresa transporte, chofer y patente.
+    // Soporta búsqueda por entrega, guia, empresa transporte, chofer, patente,
+    // productor (nombre, RUT o código de proveedor) y número de partida Romana
+    // (embebido en PartidasJson para candidatos agrupados por camión/guía).
     whereClauses.push(`(
       c.SapNumeroEntrega LIKE @search
       OR c.SapGuiaRemision LIKE @search
       OR c.SapEmpresaTransporte LIKE @search
       OR c.SapNombreChofer LIKE @search
       OR c.SapPatente LIKE @search
+      OR c.ProductorNombre LIKE @search
+      OR c.ProductorRut LIKE @search
+      OR c.ProductorCodigoProveedor LIKE @search
+      OR c.PartidasJson LIKE @search
     )`);
   }
   if (filters.sourceSystem) {
@@ -267,57 +274,114 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
       INTO #lips_current_pref
       FROM [cfl].[VW_LipsActual];
 
+      -- Schema explícito del buffer de candidatos. Todas las columnas que
+      -- pueden no aplicar a un origen (SAP vs Romana) son NULLABLE.
+      -- SapNumeroEntrega lo es porque un candidato Romana multi-partida no
+      -- tiene un único número de entrega; la identidad es la guía del camión.
+      CREATE TABLE #candidates (
+        IdSapEntrega              BIGINT          NOT NULL,
+        SapNumeroEntrega          NVARCHAR(20)    NULL,
+        SistemaFuente             NVARCHAR(50)    NOT NULL,
+        SapGuiaRemision           NVARCHAR(30)    NULL,
+        SapCodigoTipoFlete        NVARCHAR(10)    NULL,
+        SapCentroCosto            NVARCHAR(10)    NULL,
+        SapCuentaMayor            NVARCHAR(30)    NULL,
+        SapDestinatario           NVARCHAR(40)    NULL,
+        IdProductor               BIGINT          NULL,
+        ProductorCodigoProveedor  NVARCHAR(20)    NULL,
+        ProductorRut              NVARCHAR(20)    NULL,
+        ProductorNombre           NVARCHAR(100)   NULL,
+        SapFechaSalida            VARCHAR(10)     NULL,
+        FechaReferencia           VARCHAR(10)     NULL,
+        SapHoraSalida             VARCHAR(8)      NULL,
+        SapEmpresaTransporte      NVARCHAR(60)    NULL,
+        SapNombreChofer           NVARCHAR(80)    NULL,
+        SapPatente                NVARCHAR(20)    NULL,
+        SapCarro                  NVARCHAR(20)    NULL,
+        SapPesoTotal              DECIMAL(15,3)   NULL,
+        SapPesoNeto               DECIMAL(15,3)   NULL,
+        posiciones_total          INT             NOT NULL,
+        cantidad_entregada_total  DECIMAL(18,3)   NOT NULL,
+        IdTipoFlete               BIGINT          NULL,
+        tipo_flete_nombre         NVARCHAR(100)   NULL,
+        TipoFleteActivo           BIT             NULL,
+        IdImputacionFlete         BIGINT          NULL,
+        IdCentroCosto             BIGINT          NULL,
+        IdCuentaMayor             BIGINT          NULL,
+        Estado                    NVARCHAR(20)    NOT NULL,
+        puede_ingresar            BIT             NOT NULL,
+        motivo_no_ingreso         NVARCHAR(200)   NULL,
+        FechaUltimaVista          DATETIME2(0)    NULL,
+        FechaActualizacion        DATETIME2(0)    NOT NULL,
+        OrigenDatos               NVARCHAR(20)    NOT NULL,
+        PartidasJson              NVARCHAR(MAX)   NULL
+      );
+
+      INSERT INTO #candidates (
+        IdSapEntrega, SapNumeroEntrega, SistemaFuente,
+        SapGuiaRemision, SapCodigoTipoFlete, SapCentroCosto, SapCuentaMayor,
+        SapDestinatario, IdProductor, ProductorCodigoProveedor, ProductorRut, ProductorNombre,
+        SapFechaSalida, FechaReferencia, SapHoraSalida,
+        SapEmpresaTransporte, SapNombreChofer, SapPatente, SapCarro,
+        SapPesoTotal, SapPesoNeto,
+        posiciones_total, cantidad_entregada_total,
+        IdTipoFlete, tipo_flete_nombre, TipoFleteActivo,
+        IdImputacionFlete, IdCentroCosto, IdCuentaMayor,
+        Estado, puede_ingresar, motivo_no_ingreso,
+        FechaUltimaVista, FechaActualizacion,
+        OrigenDatos, PartidasJson
+      )
       SELECT
         e.IdSapEntrega,
         e.SapNumeroEntrega,
         e.SistemaFuente,
 
-        SapGuiaRemision = NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), ''),
-        SapCodigoTipoFlete = NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''),
-        SapCentroCosto = NULLIF(LTRIM(RTRIM(lk.SapCentroCosto)), ''),
-        SapCuentaMayor = NULLIF(LTRIM(RTRIM(lk.SapCuentaMayor)), ''),
-        SapDestinatario = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), ''),
-        IdProductor = prod.IdProductor,
-        ProductorCodigoProveedor = prod.CodigoProveedor,
-        ProductorRut = prod.Rut,
-        ProductorNombre = prod.Nombre,
-        SapFechaSalida = CONVERT(VARCHAR(10), lk.SapFechaSalida, 23),
-        FechaReferencia = CONVERT(VARCHAR(10), COALESCE(
+        NULLIF(LTRIM(RTRIM(lk.SapGuiaRemision)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapCentroCosto)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapCuentaMayor)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), ''),
+        prod.IdProductor,
+        prod.CodigoProveedor,
+        prod.Rut,
+        prod.Nombre,
+        CONVERT(VARCHAR(10), lk.SapFechaSalida, 23),
+        CONVERT(VARCHAR(10), COALESCE(
           CASE WHEN lk.SapFechaSalida > '1900-01-01' THEN lk.SapFechaSalida END,
           CASE WHEN lk.SapFechaEntregaReal > '1900-01-01' THEN lk.SapFechaEntregaReal END,
           CAST(e.FechaCreacion AS DATE)
         ), 23),
-        SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
-        SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
-        SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
-        SapPatente = NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
-        SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
-        SapPesoTotal = lk.SapPesoTotal,
-        SapPesoNeto = lk.SapPesoNeto,
+        CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
+        NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
+        NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
+        lk.SapPesoTotal,
+        lk.SapPesoNeto,
 
-        posiciones_total = COUNT(lp.SapPosicion),
-        cantidad_entregada_total = COALESCE(SUM(CAST(lp.SapCantidadEntregada AS DECIMAL(18,3))), 0),
+        COUNT(lp.SapPosicion),
+        COALESCE(SUM(CAST(lp.SapCantidadEntregada AS DECIMAL(18,3))), 0),
 
-        IdTipoFlete = tf.IdTipoFlete,
-        tipo_flete_nombre = tf.Nombre,
-        TipoFleteActivo = CAST(tf.Activo AS BIT),
-        IdImputacionFlete = COALESCE(
+        tf.IdTipoFlete,
+        tf.Nombre,
+        CAST(tf.Activo AS BIT),
+        COALESCE(
           im_direct.IdImputacionFlete,
           CASE WHEN im_default.CntActivas = 1 THEN im_default.IdImputacionFlete ELSE NULL END
         ),
-        IdCentroCosto = COALESCE(
+        COALESCE(
           cc_sap.IdCentroCosto,
           im_direct.IdCentroCosto,
           CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCentroCosto ELSE NULL END
         ),
-        IdCuentaMayor = COALESCE(
+        COALESCE(
           cm_sap.IdCuentaMayor,
           im_direct.IdCuentaMayor,
           CASE WHEN im_default.CntActivas = 1 THEN im_default.IdCuentaMayor ELSE NULL END
         ),
-        -- Semantica: candidatos (aun no existe cabecera) => siempre DETECTADO.
-        Estado = 'DETECTADO',
-        puede_ingresar = CAST(
+        -- Semántica: candidatos (aun no existe cabecera) => siempre DETECTADO.
+        'DETECTADO',
+        CAST(
           CASE
             WHEN tf.IdTipoFlete IS NULL THEN 0
             WHEN COALESCE(
@@ -335,7 +399,7 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
             ELSE 1
           END AS BIT
         ),
-        motivo_no_ingreso = CASE
+        CASE
           WHEN tf.IdTipoFlete IS NULL THEN CONCAT(
             'Falta configurar Tipo de Flete para SapCodigoTipoFlete=',
             COALESCE(NULLIF(LTRIM(RTRIM(lk.SapCodigoTipoFlete)), ''), '(NULL)')
@@ -365,8 +429,8 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
 
         e.FechaUltimaVista,
         e.FechaActualizacion,
-        OrigenDatos = CAST('DESPACHO' AS NVARCHAR(20))
-      INTO #candidates
+        'DESPACHO',
+        NULL
       FROM [cfl].[SapEntrega] e
       LEFT JOIN [cfl].[VW_LikpActual] lk
         ON lk.SapNumeroEntrega = e.SapNumeroEntrega
@@ -454,7 +518,52 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         e.FechaUltimaVista,
         e.FechaActualizacion;
 
-      -- Romana candidates (recepciones)
+      -- Romana candidates (recepciones) agrupados por camión/guía.
+      -- Una fila candidata = (SistemaFuente, GuiaDespacho, Conductor, Patente, Carro).
+      -- Todas las partidas (NumeroPartida) de ese viaje se colapsan en un único
+      -- candidato; la lista se expone vía PartidasJson (fuente única de verdad).
+      -- Se asume productor uniforme por guía: MAX() devuelve uno estable y, si
+      -- hay discrepancia excepcional, se toma el lexicográficamente mayor.
+      WITH entregas_base AS (
+        SELECT
+          re.IdRomanaEntrega,
+          re.NumeroPartida,
+          re.SistemaFuente,
+          NULLIF(LTRIM(RTRIM(rc.GuiaDespacho)), '') AS GuiaDespacho,
+          NULLIF(LTRIM(RTRIM(rc.Conductor)), '')    AS Conductor,
+          NULLIF(LTRIM(RTRIM(rc.Patente)), '')      AS Patente,
+          NULLIF(LTRIM(RTRIM(rc.Carro)), '')        AS Carro,
+          rc.CodigoProductor,
+          rc.FechaCreacionSap,
+          re.FechaCreacion,
+          re.FechaUltimaVista,
+          re.FechaActualizacion
+        FROM [cfl].[RomanaEntrega] re
+        INNER JOIN [cfl].[VW_RomanaCabeceraActual] rc
+          ON rc.NumeroPartida = re.NumeroPartida
+         AND rc.GuiaDespacho  = re.GuiaDespacho
+         AND rc.SistemaFuente = re.SistemaFuente
+        WHERE NOT EXISTS (
+                SELECT 1 FROM [cfl].[FleteRomanaEntrega] fe
+                WHERE fe.IdRomanaEntrega = re.IdRomanaEntrega)
+          AND NOT EXISTS (
+                SELECT 1 FROM [cfl].[RomanaEntregaDescarte] sd
+                WHERE sd.IdRomanaEntrega = re.IdRomanaEntrega AND sd.Activo = 1)
+          AND NULLIF(LTRIM(RTRIM(rc.GuiaDespacho)), '') IS NOT NULL
+      ),
+      grupo_peso AS (
+        -- Peso total por grupo (camión/guía), usando posiciones distintas de la vista.
+        SELECT
+          eb.SistemaFuente, eb.GuiaDespacho, eb.Conductor, eb.Patente, eb.Carro,
+          TotalPeso    = SUM(rd.PesoReal),
+          PosicionCnt  = COUNT(rd.Posicion)
+        FROM entregas_base eb
+        LEFT JOIN [cfl].[VW_RomanaDetalleActual] rd
+          ON rd.NumeroPartida = eb.NumeroPartida
+         AND rd.GuiaDespacho  = eb.GuiaDespacho
+         AND rd.SistemaFuente = eb.SistemaFuente
+        GROUP BY eb.SistemaFuente, eb.GuiaDespacho, eb.Conductor, eb.Patente, eb.Carro
+      )
       INSERT INTO #candidates (
         IdSapEntrega, SapNumeroEntrega, SistemaFuente,
         SapGuiaRemision, SapCodigoTipoFlete, SapCentroCosto, SapCuentaMayor,
@@ -467,50 +576,73 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         IdImputacionFlete, IdCentroCosto, IdCuentaMayor,
         Estado, puede_ingresar, motivo_no_ingreso,
         FechaUltimaVista, FechaActualizacion,
-        OrigenDatos
+        OrigenDatos,
+        PartidasJson
       )
       SELECT
-        -re.IdRomanaEntrega,
-        COALESCE(rc.NumeroPartida, rc.IdRomana),
-        re.SistemaFuente,
-        NULLIF(LTRIM(RTRIM(rc.GuiaDespacho)), ''),
+        -- IdSapEntrega negativo determinístico por grupo, evitando el overflow
+        -- que produce ABS(INT.MIN). Se enmascara a 31 bits y luego se niega en
+        -- BIGINT para que la columna (BIGINT en #candidates) acepte sin error.
+        -(CAST(CHECKSUM(
+            CONCAT(
+              eb.SistemaFuente, '|',
+              eb.GuiaDespacho,  '|',
+              COALESCE(eb.Conductor, ''), '|',
+              COALESCE(eb.Patente,   ''), '|',
+              COALESCE(eb.Carro,     '')
+            )
+          ) & 0x7FFFFFFF AS BIGINT))                              AS IdSapEntrega,
+        NULL                                                      AS SapNumeroEntrega,
+        eb.SistemaFuente,
+        eb.GuiaDespacho,
         NULL, NULL, NULL,
-        rc.CodigoProductor,
-        prod.IdProductor, prod.CodigoProveedor, prod.Rut, prod.Nombre,
-        rc.FechaCreacionSap,
-        COALESCE(rc.FechaCreacionSap, CAST(re.FechaCreacion AS DATE)),
+        MAX(eb.CodigoProductor)                                   AS SapDestinatario,
+        MAX(prod.IdProductor), MAX(prod.CodigoProveedor),
+        MAX(prod.Rut),         MAX(prod.Nombre),
+        MAX(eb.FechaCreacionSap)                                  AS SapFechaSalida,
+        COALESCE(MAX(eb.FechaCreacionSap), CAST(MAX(eb.FechaCreacion) AS DATE)) AS FechaReferencia,
         NULL, NULL,
-        rc.Conductor, rc.Patente, rc.Carro,
-        COALESCE(SUM(rd.PesoReal), 0), 0,
-        COUNT(rd.Posicion),
-        COALESCE(SUM(rd.PesoReal), 0),
+        eb.Conductor, eb.Patente, eb.Carro,
+        MAX(gp.TotalPeso), 0,
+        MAX(gp.PosicionCnt),
+        MAX(gp.TotalPeso),
         NULL, NULL, NULL, NULL, NULL, NULL,
         'DETECTADO',
-        CAST(CASE WHEN rc.GuiaDespacho IS NOT NULL AND rc.FechaCreacionSap IS NOT NULL THEN 1 ELSE 0 END AS BIT),
-        CASE WHEN rc.GuiaDespacho IS NULL THEN 'Falta Guia' WHEN rc.FechaCreacionSap IS NULL THEN 'Falta Fecha' ELSE NULL END,
-        re.FechaUltimaVista,
-        re.FechaActualizacion,
-        'RECEPCION'
-      FROM [cfl].[RomanaEntrega] re
-      INNER JOIN [cfl].[VW_RomanaCabeceraActual] rc
-        ON rc.NumeroPartida = re.NumeroPartida AND rc.GuiaDespacho = re.GuiaDespacho AND rc.SistemaFuente = re.SistemaFuente
-      LEFT JOIN [cfl].[VW_RomanaDetalleActual] rd
-        ON rd.NumeroPartida = re.NumeroPartida AND rd.GuiaDespacho = re.GuiaDespacho AND rd.SistemaFuente = re.SistemaFuente
+        CAST(CASE WHEN MAX(eb.FechaCreacionSap) IS NOT NULL THEN 1 ELSE 0 END AS BIT),
+        CASE WHEN MAX(eb.FechaCreacionSap) IS NULL THEN 'Falta Fecha' ELSE NULL END,
+        MAX(eb.FechaUltimaVista),
+        MAX(eb.FechaActualizacion),
+        'RECEPCION',
+        -- Única columna que describe el grupo: array JSON de objetos
+        -- {id_romana_entrega, numero_partida}. El cliente deriva los ids de aquí
+        -- al parsear; no se duplica la lista en una segunda columna.
+        CONCAT(
+          '[',
+          STRING_AGG(
+            CONCAT(
+              '{"id_romana_entrega":', CAST(eb.IdRomanaEntrega AS VARCHAR(20)),
+              ',"numero_partida":"', STRING_ESCAPE(COALESCE(eb.NumeroPartida, ''), 'json'),
+              '"}'
+            ),
+            ','
+          ) WITHIN GROUP (ORDER BY eb.NumeroPartida, eb.IdRomanaEntrega),
+          ']'
+        )                                                          AS PartidasJson
+      FROM entregas_base eb
+      INNER JOIN grupo_peso gp
+        ON gp.SistemaFuente = eb.SistemaFuente
+       AND gp.GuiaDespacho  = eb.GuiaDespacho
+       AND ((gp.Conductor IS NULL AND eb.Conductor IS NULL) OR gp.Conductor = eb.Conductor)
+       AND ((gp.Patente   IS NULL AND eb.Patente   IS NULL) OR gp.Patente   = eb.Patente)
+       AND ((gp.Carro     IS NULL AND eb.Carro     IS NULL) OR gp.Carro     = eb.Carro)
       OUTER APPLY (
         SELECT TOP 1 p.IdProductor, p.CodigoProveedor, p.Rut, p.Nombre
         FROM [cfl].[Productor] p
-        WHERE NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(rc.CodigoProductor)), '')
+        WHERE NULLIF(LTRIM(RTRIM(p.CodigoProveedor)), '') = NULLIF(LTRIM(RTRIM(eb.CodigoProductor)), '')
         ORDER BY CASE WHEN p.Activo = 1 THEN 0 ELSE 1 END, p.IdProductor ASC
       ) prod
-      WHERE NOT EXISTS (SELECT 1 FROM [cfl].[FleteRomanaEntrega] fe WHERE fe.IdRomanaEntrega = re.IdRomanaEntrega)
-        AND NOT EXISTS (SELECT 1 FROM [cfl].[RomanaEntregaDescarte] sd WHERE sd.IdRomanaEntrega = re.IdRomanaEntrega AND sd.Activo = 1)
-        AND NULLIF(LTRIM(RTRIM(rc.GuiaDespacho)), '') IS NOT NULL
       GROUP BY
-        re.IdRomanaEntrega, rc.NumeroPartida, rc.IdRomana, re.SistemaFuente,
-        rc.GuiaDespacho, rc.CodigoProductor,
-        prod.IdProductor, prod.CodigoProveedor, prod.Rut, prod.Nombre,
-        rc.FechaCreacionSap, re.FechaCreacion, rc.Conductor, rc.Patente, rc.Carro,
-        re.FechaUltimaVista, re.FechaActualizacion;
+        eb.SistemaFuente, eb.GuiaDespacho, eb.Conductor, eb.Patente, eb.Carro;
 
       SET NOCOUNT OFF;
 
@@ -551,9 +683,16 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
         motivo_no_ingreso,
         FechaUltimaVista,
         FechaActualizacion,
-        OrigenDatos
+        OrigenDatos,
+        PartidasJson
       ${baseQuery}
       ORDER BY
+        SapGuiaRemision ASC,
+        IIF(ProductorNombre IS NULL, 1, 0) ASC,
+        ProductorNombre ASC,
+        IIF(ProductorRut IS NULL, 1, 0) ASC,
+        ProductorRut ASC,
+        ProductorCodigoProveedor ASC,
         COALESCE(CAST(FechaReferencia AS DATETIME2(0)), FechaActualizacion) DESC,
         IdSapEntrega DESC
       OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY;
@@ -580,46 +719,239 @@ router.get("/fletes/no-ingresados", requirePermission("fletes.candidatos.view"),
   }
 });
 
-router.get("/fletes/no-ingresados/romana/:id_romana_entrega/detalle", requirePermission("fletes.candidatos.view"), async (req, res, next) => {
-  const idRomanaEntrega = Number(req.params.id_romana_entrega);
-  if (!Number.isInteger(idRomanaEntrega) || idRomanaEntrega <= 0) {
-    res.status(400).json({ error: "id_romana_entrega invalido" });
+// Helpers locales para endpoints Romana multi-entrega
+function parseIdRomanaEntregas(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const ids = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const n = Number(item);
+    if (!Number.isInteger(n) || n <= 0) return null;
+    if (seen.has(n)) continue;
+    seen.add(n);
+    ids.push(n);
+  }
+  return ids.length > 0 ? ids : null;
+}
+
+// Expone una lista corta de BIGINT como parámetros escalares inline. Se usa en
+// endpoints Romana que reciben un grupo de IdRomanaEntrega; evita la necesidad
+// de declarar un tipo TVP en BD (sql.Table requiere un CREATE TYPE previo).
+// Devuelve `{ request, inClause }` — el caller interpola `inClause` donde
+// antes iría `@ids` (p. ej. `WHERE re.IdRomanaEntrega IN ${inClause}`).
+function bindIdsAsInlineParams(executor, ids) {
+  const request = typeof executor?.request === "function"
+    ? executor.request()
+    : new sql.Request(executor);
+  const placeholders = ids.map((id, i) => {
+    const name = `id_${i}`;
+    request.input(name, sql.BigInt, id);
+    return `@${name}`;
+  });
+  return { request, inClause: `(${placeholders.join(", ")})` };
+}
+
+// Fetcha el conjunto de entregas Romana y valida que formen un grupo homogéneo
+// (misma GuiaDespacho + Conductor + Patente + Carro + SistemaFuente). Además
+// devuelve el estado de cada entrega respecto a descarte/vínculo previo para
+// que el caller decida el código HTTP.
+async function loadRomanaGrupo(executor, ids) {
+  const { request, inClause } = bindIdsAsInlineParams(executor, ids);
+  const result = await request.query(`
+    SELECT
+      re.IdRomanaEntrega,
+      re.NumeroPartida,
+      re.SistemaFuente,
+      NULLIF(LTRIM(RTRIM(rc.GuiaDespacho)), '') AS GuiaDespacho,
+      NULLIF(LTRIM(RTRIM(rc.Conductor)), '')    AS Conductor,
+      NULLIF(LTRIM(RTRIM(rc.Patente)), '')      AS Patente,
+      NULLIF(LTRIM(RTRIM(rc.Carro)), '')        AS Carro,
+      rc.CodigoProductor,
+      rc.FechaCreacionSap,
+      linked = CAST(CASE WHEN EXISTS (SELECT 1 FROM [cfl].[FleteRomanaEntrega] fe WHERE fe.IdRomanaEntrega = re.IdRomanaEntrega) THEN 1 ELSE 0 END AS BIT),
+      discarded = CAST(CASE WHEN EXISTS (SELECT 1 FROM [cfl].[RomanaEntregaDescarte] sd WHERE sd.IdRomanaEntrega = re.IdRomanaEntrega AND sd.Activo = 1) THEN 1 ELSE 0 END AS BIT)
+    FROM [cfl].[RomanaEntrega] re
+    INNER JOIN [cfl].[VW_RomanaCabeceraActual] rc
+      ON rc.NumeroPartida = re.NumeroPartida
+     AND rc.GuiaDespacho  = re.GuiaDespacho
+     AND rc.SistemaFuente = re.SistemaFuente
+    WHERE re.IdRomanaEntrega IN ${inClause};
+  `);
+  return result.recordset;
+}
+
+function validarGrupoHomogeneo(rows, ids) {
+  if (rows.length !== ids.length) {
+    const found = new Set(rows.map((r) => Number(r.IdRomanaEntrega)));
+    const missing = ids.filter((id) => !found.has(id));
+    return { ok: false, status: 404, error: `Entregas Romana no encontradas: ${missing.join(", ")}` };
+  }
+  const linked = rows.filter((r) => r.linked);
+  if (linked.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Entregas Romana ya vinculadas a un flete: ${linked.map((r) => r.IdRomanaEntrega).join(", ")}`,
+    };
+  }
+  const discarded = rows.filter((r) => r.discarded);
+  if (discarded.length > 0) {
+    return {
+      ok: false,
+      status: 409,
+      error: `Entregas Romana descartadas: ${discarded.map((r) => r.IdRomanaEntrega).join(", ")}`,
+    };
+  }
+  const ref = rows[0];
+  const mismatch = rows.find((r) =>
+    (r.SistemaFuente || null) !== (ref.SistemaFuente || null)
+    || (r.GuiaDespacho  || null) !== (ref.GuiaDespacho  || null)
+    || (r.Conductor     || null) !== (ref.Conductor     || null)
+    || (r.Patente       || null) !== (ref.Patente       || null)
+    || (r.Carro         || null) !== (ref.Carro         || null)
+  );
+  if (mismatch) {
+    return {
+      ok: false,
+      status: 409,
+      error: "Las entregas Romana no comparten camión/guía; no pueden agruparse en un mismo flete",
+    };
+  }
+  return {
+    ok: true,
+    rows,
+    grupo: {
+      SistemaFuente: ref.SistemaFuente,
+      GuiaDespacho:  ref.GuiaDespacho,
+      Conductor:     ref.Conductor,
+      Patente:       ref.Patente,
+      Carro:         ref.Carro,
+      CodigoProductor: ref.CodigoProductor,
+      FechaCreacionSap: ref.FechaCreacionSap,
+    },
+  };
+}
+
+// Detalle agregado de un grupo Romana (cabecera compartida + todas las posiciones).
+router.post("/fletes/no-ingresados/romana/detalle", requirePermission("fletes.candidatos.view"), async (req, res, next) => {
+  const ids = parseIdRomanaEntregas(req.body?.id_romana_entregas);
+  if (!ids) {
+    res.status(400).json({ error: "id_romana_entregas invalido (se espera array no vacío de enteros positivos)" });
     return;
   }
 
   try {
     const pool = await getPool();
-    const cabResult = await pool.request()
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`
-        SELECT rc.*, re.IdRomanaEntrega
-        FROM [cfl].[RomanaEntrega] re
-        INNER JOIN [cfl].[VW_RomanaCabeceraActual] rc
-          ON rc.NumeroPartida = re.NumeroPartida AND rc.GuiaDespacho = re.GuiaDespacho AND rc.SistemaFuente = re.SistemaFuente
-        WHERE re.IdRomanaEntrega = @id;
-      `);
-
-    if (cabResult.recordset.length === 0) {
-      res.status(404).json({ error: "Entrega Romana no encontrada" });
+    const rows = await loadRomanaGrupo(pool, ids);
+    const validation = validarGrupoHomogeneo(rows, ids);
+    if (!validation.ok) {
+      res.status(validation.status).json({ error: validation.error });
       return;
     }
 
-    const cabecera = cabResult.recordset[0];
-    const detResult = await pool.request()
-      .input("nPartida", sql.NVarChar(20), cabecera.NumeroPartida)
-      .input("guia", sql.NVarChar(30), cabecera.GuiaDespacho)
-      .input("sf", sql.NVarChar(50), cabecera.SistemaFuente)
+    const { grupo } = validation;
+
+    const cabResult = await pool.request()
+      .input("guia", sql.NVarChar(30), grupo.GuiaDespacho)
+      .input("sf",   sql.NVarChar(50), grupo.SistemaFuente)
+      .input("cond", sql.NVarChar(80), grupo.Conductor)
+      .input("pat",  sql.NVarChar(20), grupo.Patente)
+      .input("car",  sql.NVarChar(20), grupo.Carro)
       .query(`
-        SELECT * FROM [cfl].[VW_RomanaDetalleActual]
-        WHERE NumeroPartida = @nPartida AND GuiaDespacho = @guia AND SistemaFuente = @sf
-        ORDER BY Posicion;
+        SELECT TOP 1
+          rc.SistemaFuente,
+          rc.GuiaDespacho,
+          rc.Conductor,
+          rc.Patente,
+          rc.Carro,
+          rc.CodigoProductor,
+          rc.ProductorDescripcion,
+          rc.ProductorDireccion,
+          rc.ProductorComuna,
+          rc.ProductorProvincia,
+          rc.Centro,
+          rc.CentroNombre,
+          rc.PlantaDestino,
+          rc.PlantaDestinoNombre,
+          rc.AlmacenDestino,
+          rc.AlmacenDestinoNombre,
+          rc.FechaCreacionSap,
+          rc.FechaModificacionSap,
+          rc.OrdenCompra,
+          rc.Temporada,
+          rc.CSG,
+          rc.GuiaAlterna
+        FROM [cfl].[VW_RomanaCabeceraActual] rc
+        WHERE NULLIF(LTRIM(RTRIM(rc.GuiaDespacho)), '') = @guia
+          AND rc.SistemaFuente = @sf
+          AND ((@cond IS NULL AND NULLIF(LTRIM(RTRIM(rc.Conductor)), '') IS NULL) OR NULLIF(LTRIM(RTRIM(rc.Conductor)), '') = @cond)
+          AND ((@pat  IS NULL AND NULLIF(LTRIM(RTRIM(rc.Patente)), '')   IS NULL) OR NULLIF(LTRIM(RTRIM(rc.Patente)), '')   = @pat)
+          AND ((@car  IS NULL AND NULLIF(LTRIM(RTRIM(rc.Carro)), '')     IS NULL) OR NULLIF(LTRIM(RTRIM(rc.Carro)), '')     = @car)
+        ORDER BY rc.FechaCreacionSap DESC;
       `);
+
+    const cabecera = cabResult.recordset[0] || {
+      SistemaFuente: grupo.SistemaFuente,
+      GuiaDespacho:  grupo.GuiaDespacho,
+      Conductor:     grupo.Conductor,
+      Patente:       grupo.Patente,
+      Carro:         grupo.Carro,
+      CodigoProductor: grupo.CodigoProductor,
+      FechaCreacionSap: grupo.FechaCreacionSap,
+    };
+
+    const { request: detReq, inClause: detInClause } = bindIdsAsInlineParams(pool, ids);
+    const detResult = await detReq.query(`
+      SELECT
+        re.IdRomanaEntrega,
+        rd.NumeroPartida,
+        rd.GuiaDespacho,
+        rd.SistemaFuente,
+        rd.Posicion,
+        rd.Material,
+        rd.MaterialDescripcion,
+        rd.Lote,
+        rd.PesoReal,
+        rd.UnidadMedida,
+        rd.CodigoEspecie,
+        rd.EspecieDescripcion,
+        rd.Envase,
+        rd.EnvaseDescripcion,
+        rd.SubEnvase,
+        rd.SubEnvaseDescripcion,
+        rd.CantidadSubEnvaseL,
+        rd.PesoEnvase,
+        rd.PesoSubEnvase
+      FROM [cfl].[RomanaEntrega] re
+      INNER JOIN [cfl].[VW_RomanaDetalleActual] rd
+        ON rd.NumeroPartida = re.NumeroPartida
+       AND rd.GuiaDespacho  = re.GuiaDespacho
+       AND rd.SistemaFuente = re.SistemaFuente
+      WHERE re.IdRomanaEntrega IN ${detInClause}
+      ORDER BY rd.NumeroPartida, TRY_CONVERT(INT, rd.Posicion), rd.Posicion;
+    `);
+
+    const partidas = validation.rows
+      .map((r) => ({
+        id_romana_entrega: Number(r.IdRomanaEntrega),
+        numero_partida: r.NumeroPartida,
+        fecha_sap: r.FechaCreacionSap,
+      }))
+      .sort((a, b) => (a.numero_partida || "").localeCompare(b.numero_partida || ""));
 
     res.json({
       data: {
         cabecera,
         detalles: detResult.recordset,
-        origen: 'ROMANA',
+        origen: "ROMANA",
+        grupo: {
+          sistema_fuente: grupo.SistemaFuente,
+          guia_despacho:  grupo.GuiaDespacho,
+          conductor:      grupo.Conductor,
+          patente:        grupo.Patente,
+          carro:          grupo.Carro,
+          partidas,
+        },
       },
     });
   } catch (error) {
@@ -627,17 +959,18 @@ router.get("/fletes/no-ingresados/romana/:id_romana_entrega/detalle", requirePer
   }
 });
 
-// ── Crear flete desde candidato Romana ──────────────────────────────────
-router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePermission("fletes.crear"), async (req, res, next) => {
-  const idRomanaEntrega = Number(req.params.id_romana_entrega);
-  if (!Number.isInteger(idRomanaEntrega) || idRomanaEntrega <= 0) {
-    res.status(400).json({ error: "id_romana_entrega invalido" });
+// ── Crear flete desde candidato Romana (grupo multi-entrega) ────────────
+router.post("/fletes/no-ingresados/romana/crear", requirePermission("fletes.crear"), async (req, res, next) => {
+  const body = req.body || {};
+  const ids = parseIdRomanaEntregas(body.id_romana_entregas);
+  if (!ids) {
+    res.status(400).json({ error: "id_romana_entregas invalido (se espera array no vacío de enteros positivos)" });
     return;
   }
 
-  const body = req.body || {};
   const cabeceraIn = body.cabecera || {};
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
+  const transportIntent = body.transport || null;
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
@@ -645,8 +978,6 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
-  const montoAplicadoRaw = cabeceraIn.monto_aplicado;
-  const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
   const montoExtraRaw = cabeceraIn.monto_extra;
   const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
@@ -678,6 +1009,17 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     return;
   }
 
+  const idsSet = new Set(ids);
+  for (const detalle of detallesIn) {
+    const detId = parseOptionalBigInt(detalle.id_romana_entrega);
+    if (!detId || !idsSet.has(detId)) {
+      res.status(400).json({
+        error: `Detalle con id_romana_entrega=${detalle.id_romana_entrega} no pertenece al grupo enviado`,
+      });
+      return;
+    }
+  }
+
   let transaction;
 
   try {
@@ -685,55 +1027,23 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     transaction = new sql.Transaction(pool);
     await transaction.begin();
 
+    const rows = await loadRomanaGrupo(transaction, ids);
+    const validation = validarGrupoHomogeneo(rows, ids);
+    if (!validation.ok) {
+      await transaction.rollback();
+      res.status(validation.status).json({ error: validation.error });
+      return;
+    }
+    const { grupo } = validation;
+
     const now = new Date();
 
-    // Verificar que la entrega Romana existe y no está descartada/vinculada
-    const romanaResult = await new sql.Request(transaction)
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`
-        SELECT re.IdRomanaEntrega, re.NumeroPartida, re.GuiaDespacho, re.SistemaFuente,
-               rc.CodigoProductor, rc.GuiaDespacho AS CabGuia, rc.FechaCreacionSap,
-               rc.Patente, rc.Carro, rc.Conductor
-        FROM [cfl].[RomanaEntrega] re
-        INNER JOIN [cfl].[VW_RomanaCabeceraActual] rc
-          ON rc.NumeroPartida = re.NumeroPartida AND rc.GuiaDespacho = re.GuiaDespacho AND rc.SistemaFuente = re.SistemaFuente
-        WHERE re.IdRomanaEntrega = @id;
-      `);
-
-    if (romanaResult.recordset.length === 0) {
-      await transaction.rollback();
-      res.status(404).json({ error: "Entrega Romana no encontrada" });
-      return;
-    }
-    const romana = romanaResult.recordset[0];
-
-    const discardedResult = await new sql.Request(transaction)
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`
-        SELECT TOP 1 1 AS is_discarded
-        FROM [cfl].[RomanaEntregaDescarte]
-        WHERE IdRomanaEntrega = @id AND Activo = 1;
-      `);
-
-    if (discardedResult.recordset.length > 0) {
-      await transaction.rollback();
-      res.status(409).json({ error: "La entrega Romana se encuentra descartada" });
-      return;
-    }
-
-    const existsResult = await new sql.Request(transaction)
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`
-        SELECT TOP 1 1 AS already_linked
-        FROM [cfl].[FleteRomanaEntrega]
-        WHERE IdRomanaEntrega = @id;
-      `);
-
-    if (existsResult.recordset.length > 0) {
-      await transaction.rollback();
-      res.status(409).json({ error: "La entrega Romana ya se encuentra asociada a un flete" });
-      return;
-    }
+    // Transporte inteligente: crea/actualiza empresa/chofer/camion y opcionalmente recalc tarifa.
+    const transportResult = await applyTransportIntent(transaction, { cabeceraIn, transportIntent, now });
+    const idTarifaResolved = parseOptionalBigInt(cabeceraIn.id_tarifa);
+    const montoAplicadoResolved = (cabeceraIn.monto_aplicado === null || cabeceraIn.monto_aplicado === undefined)
+      ? null
+      : (Number.isFinite(Number(cabeceraIn.monto_aplicado)) ? Number(cabeceraIn.monto_aplicado) : null);
 
     const imputacion = await resolveImputacionFlete(transaction, {
       idTipoFlete,
@@ -754,7 +1064,8 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     }
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
-    const idProductor = idProductorInput || await resolveProductorIdByDestinatario(transaction, null, romana.CodigoProductor);
+    const idProductor = idProductorInput
+      || await resolveProductorIdByDestinatario(transaction, null, grupo.CodigoProductor);
 
     const estado = deriveLifecycleStatus({
       requestedStatus,
@@ -769,13 +1080,15 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     const guiaRemisionIn = toNullableTrimmedString(cabeceraIn.guia_remision);
     const numeroEntregaIn = toNullableTrimmedString(cabeceraIn.numero_entrega);
 
+    // SapNumeroEntrega=NULL: una cabecera multi-partida no tiene un único
+    // número de partida; la identidad del flete es la guía del camión.
     const insertReq = new sql.Request(transaction);
     insertReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
-    insertReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(romana.NumeroPartida));
+    insertReq.input("sapNumeroEntrega", sql.VarChar(20), null);
     insertReq.input("sapCodigoTipoFlete", sql.Char(4), null);
     insertReq.input("sapCentroCosto", sql.Char(10), null);
     insertReq.input("sapCuentaMayor", sql.Char(10), null);
-    insertReq.input("sapGuiaRemision", sql.Char(25), toNullableTrimmedString(romana.CabGuia));
+    insertReq.input("sapGuiaRemision", sql.Char(25), toNullableTrimmedString(grupo.GuiaDespacho));
     insertReq.input("guiaRemision", sql.Char(25), guiaRemisionIn ? guiaRemisionIn.slice(0, 25) : null);
     insertReq.input("numeroEntrega", sql.VarChar(20), numeroEntregaIn ? numeroEntregaIn.slice(0, 20) : null);
     insertReq.input("idProductor", sql.BigInt, idProductor);
@@ -784,12 +1097,14 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     insertReq.input("estado", sql.VarChar(20), estado);
     insertReq.input("fechaSalida", sql.Date, fechaSalida);
     insertReq.input("horaSalida", sql.VarChar(8), horaSalida);
-    insertReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicado);
+    insertReq.input("montoAplicado", sql.Decimal(18, 2), montoAplicadoResolved);
     insertReq.input("montoExtra", sql.Decimal(18, 2), montoExtra);
     insertReq.input("idMovil", sql.BigInt, idMovil);
-    insertReq.input("idTarifa", sql.BigInt, idTarifa);
+    insertReq.input("idTarifa", sql.BigInt, idTarifaResolved);
     insertReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
-    insertReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_usuario_creador));
+    // Creador derivado del token. Nunca se acepta del body: el cliente no puede
+    // decidir quién "creó" el flete; lo dicta la sesión autenticada.
+    insertReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(req.authnClaims?.id_usuario));
     insertReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
     insertReq.input("idEspecie", sql.BigInt, idEspecieInput);
     insertReq.input("createdAt", sql.DateTime2(0), now);
@@ -824,21 +1139,23 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
 
     const idCabeceraFlete = cabeceraResult.recordset[0].IdCabeceraFlete;
 
-    // Vincular con RomanaEntrega via FleteRomanaEntrega
-    await new sql.Request(transaction)
-      .input("idCabeceraFlete", sql.BigInt, idCabeceraFlete)
-      .input("idRomanaEntrega", sql.BigInt, idRomanaEntrega)
-      .input("origenDatos", sql.NVarChar(10), "ROMANA")
-      .input("tipoRelacion", sql.NVarChar(20), "PRINCIPAL")
-      .input("createdAt", sql.DateTime2(0), now)
-      .query(`
-        INSERT INTO [cfl].[FleteRomanaEntrega] (
-          [IdCabeceraFlete], [IdRomanaEntrega], [OrigenDatos], [TipoRelacion], [FechaCreacion]
-        )
-        VALUES (@idCabeceraFlete, @idRomanaEntrega, @origenDatos, @tipoRelacion, @createdAt);
-      `);
+    // Vincular cada entrega Romana del grupo con la cabecera.
+    for (const idRomanaEntrega of ids) {
+      await new sql.Request(transaction)
+        .input("idCabeceraFlete", sql.BigInt, idCabeceraFlete)
+        .input("idRomanaEntrega", sql.BigInt, idRomanaEntrega)
+        .input("origenDatos", sql.NVarChar(10), "ROMANA")
+        .input("tipoRelacion", sql.NVarChar(20), "PRINCIPAL")
+        .input("createdAt", sql.DateTime2(0), now)
+        .query(`
+          INSERT INTO [cfl].[FleteRomanaEntrega] (
+            [IdCabeceraFlete], [IdRomanaEntrega], [OrigenDatos], [TipoRelacion], [FechaCreacion]
+          )
+          VALUES (@idCabeceraFlete, @idRomanaEntrega, @origenDatos, @tipoRelacion, @createdAt);
+        `);
+    }
 
-    // Insertar detalles
+    // Insertar detalles persistiendo la trazabilidad Romana por posición/lote/partida.
     for (const detalle of detallesIn) {
       const material = toNullableTrimmedString(detalle.material);
       const descripcion = toNullableTrimmedString(detalle.descripcion);
@@ -846,6 +1163,10 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
       const cantidad = detalle.cantidad === null || detalle.cantidad === undefined || detalle.cantidad === "" ? null : Number(detalle.cantidad);
       const peso = detalle.peso === null || detalle.peso === undefined || detalle.peso === "" ? null : Number(detalle.peso);
       const idEspecie = parseOptionalBigInt(detalle.id_especie);
+      const idRomanaEntregaDet = parseOptionalBigInt(detalle.id_romana_entrega);
+      const romanaNumeroPartida = toNullableTrimmedString(detalle.numero_partida);
+      const romanaPosicion = toNullableTrimmedString(detalle.sap_posicion);
+      const romanaLote = toNullableTrimmedString(detalle.sap_lote);
 
       await new sql.Request(transaction)
         .input("idCabeceraFlete", sql.BigInt, idCabeceraFlete)
@@ -855,15 +1176,21 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
         .input("cantidad", sql.Decimal(12, 2), Number.isFinite(cantidad) ? cantidad : null)
         .input("unidad", sql.Char(3), unidad ? unidad.slice(0, 3) : null)
         .input("peso", sql.Decimal(15, 3), Number.isFinite(peso) ? peso : null)
+        .input("idRomanaEntrega", sql.BigInt, idRomanaEntregaDet)
+        .input("romanaNumeroPartida", sql.NVarChar(20), romanaNumeroPartida)
+        .input("romanaPosicion", sql.NVarChar(10), romanaPosicion)
+        .input("romanaLote", sql.NVarChar(20), romanaLote)
         .input("createdAt", sql.DateTime2(0), now)
         .query(`
           INSERT INTO [cfl].[DetalleFlete] (
             [IdCabeceraFlete], [IdEspecie], [Material], [Descripcion],
-            [Cantidad], [Unidad], [Peso], [FechaCreacion]
+            [Cantidad], [Unidad], [Peso], [FechaCreacion],
+            [IdRomanaEntrega], [RomanaNumeroPartida], [RomanaPosicion], [RomanaLote]
           )
           VALUES (
             @idCabeceraFlete, @idEspecie, @material, @descripcion,
-            @cantidad, @unidad, @peso, @createdAt
+            @cantidad, @unidad, @peso, @createdAt,
+            @idRomanaEntrega, @romanaNumeroPartida, @romanaPosicion, @romanaLote
           );
         `);
     }
@@ -871,10 +1198,19 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/crear", requirePerm
     await transaction.commit();
 
     res.status(201).json({
-      message: "Cabecera y detalle creados desde Romana",
+      message: "Cabecera y detalle creados desde grupo Romana",
       data: {
         id_cabecera_flete: idCabeceraFlete,
-        id_romana_entrega: idRomanaEntrega,
+        id_romana_entregas: ids,
+        resolved: {
+          id_empresa_transporte: cabeceraIn.id_empresa_transporte ?? null,
+          id_chofer: cabeceraIn.id_chofer ?? null,
+          id_camion: cabeceraIn.id_camion ?? null,
+          id_tarifa: idTarifaResolved,
+          id_movil: idMovil,
+        },
+        warnings: transportResult.warnings,
+        tipo_camion_changed: transportResult.tipoCamionChanged,
       },
     });
   } catch (error) {
@@ -917,6 +1253,7 @@ router.get("/fletes/no-ingresados/:id_sap_entrega/detalle", requirePermission("f
         SapHoraSalida = CONVERT(VARCHAR(8), lk.SapHoraSalida, 108),
         SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
         SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
+        SapIdFiscalChofer = NULLIF(LTRIM(RTRIM(lk.SapIdFiscalChofer)), ''),
         SapPatente = NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
         SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
         SapPesoTotal = lk.SapPesoTotal,
@@ -1470,11 +1807,11 @@ router.post("/fletes/no-ingresados/descartar-todos", requirePermission("fletes.s
   }
 });
 
-// ── Descartar candidato Romana ──────────────────────────────────────────
-router.post("/fletes/no-ingresados/romana/:id_romana_entrega/descartar", requirePermission("fletes.sap.descartar"), async (req, res, next) => {
-  const idRomanaEntrega = Number(req.params.id_romana_entrega);
-  if (!Number.isInteger(idRomanaEntrega) || idRomanaEntrega <= 0) {
-    res.status(400).json({ error: "id_romana_entrega invalido" });
+// ── Descartar grupo de candidatos Romana ────────────────────────────────
+router.post("/fletes/no-ingresados/romana/descartar", requirePermission("fletes.sap.descartar"), async (req, res, next) => {
+  const ids = parseIdRomanaEntregas(req.body?.id_romana_entregas);
+  if (!ids) {
+    res.status(400).json({ error: "id_romana_entregas invalido (se espera array no vacío de enteros positivos)" });
     return;
   }
 
@@ -1497,56 +1834,64 @@ router.post("/fletes/no-ingresados/romana/:id_romana_entrega/descartar", require
     await transaction.begin();
     const now = new Date();
 
-    const entregaResult = await new sql.Request(transaction)
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`SELECT TOP 1 IdRomanaEntrega FROM [cfl].[RomanaEntrega] WHERE IdRomanaEntrega = @id;`);
-
-    if (entregaResult.recordset.length === 0) {
+    const { request: statusReq, inClause: statusInClause } = bindIdsAsInlineParams(transaction, ids);
+    const statusResult = await statusReq.query(`
+      SELECT
+        re.IdRomanaEntrega,
+        linked = CAST(CASE WHEN EXISTS (SELECT 1 FROM [cfl].[FleteRomanaEntrega] fe WHERE fe.IdRomanaEntrega = re.IdRomanaEntrega) THEN 1 ELSE 0 END AS BIT),
+        hasDiscard = CAST(CASE WHEN EXISTS (SELECT 1 FROM [cfl].[RomanaEntregaDescarte] sd WHERE sd.IdRomanaEntrega = re.IdRomanaEntrega) THEN 1 ELSE 0 END AS BIT)
+      FROM [cfl].[RomanaEntrega] re
+      WHERE re.IdRomanaEntrega IN ${statusInClause};
+    `);
+    const statusRows = statusResult.recordset;
+    if (statusRows.length !== ids.length) {
+      const found = new Set(statusRows.map((r) => Number(r.IdRomanaEntrega)));
+      const missing = ids.filter((id) => !found.has(id));
       await transaction.rollback();
-      res.status(404).json({ error: "Entrega Romana no encontrada" });
+      res.status(404).json({ error: `Entregas Romana no encontradas: ${missing.join(", ")}` });
+      return;
+    }
+    const linked = statusRows.filter((r) => r.linked);
+    if (linked.length > 0) {
+      await transaction.rollback();
+      res.status(409).json({
+        error: `Entregas Romana ya vinculadas a un flete, no se pueden descartar: ${linked.map((r) => r.IdRomanaEntrega).join(", ")}`,
+      });
       return;
     }
 
-    const linkedResult = await new sql.Request(transaction)
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`SELECT TOP 1 1 AS already_linked FROM [cfl].[FleteRomanaEntrega] WHERE IdRomanaEntrega = @id;`);
-
-    if (linkedResult.recordset.length > 0) {
-      await transaction.rollback();
-      res.status(409).json({ error: "La entrega Romana ya se encuentra asociada a un flete y no se puede descartar" });
-      return;
-    }
-
-    const currentDiscardResult = await new sql.Request(transaction)
-      .input("id", sql.BigInt, idRomanaEntrega)
-      .query(`SELECT TOP 1 IdRomanaEntregaDescarte FROM [cfl].[RomanaEntregaDescarte] WHERE IdRomanaEntrega = @id;`);
-
-    if (currentDiscardResult.recordset.length > 0) {
-      await new sql.Request(transaction)
-        .input("id", sql.BigInt, idRomanaEntrega)
-        .input("motivo", sql.VarChar(200), motivoFinal)
-        .input("updatedAt", sql.DateTime2(0), now)
-        .input("createdBy", sql.BigInt, idUsuarioActor)
-        .query(`
-          UPDATE [cfl].[RomanaEntregaDescarte]
-          SET Activo = 1, Motivo = @motivo, FechaActualizacion = @updatedAt, CreadoPor = @createdBy, FechaRestauracion = NULL, RestauradoPor = NULL
-          WHERE IdRomanaEntrega = @id;
-        `);
-    } else {
-      await new sql.Request(transaction)
-        .input("id", sql.BigInt, idRomanaEntrega)
-        .input("motivo", sql.VarChar(200), motivoFinal)
-        .input("createdAt", sql.DateTime2(0), now)
-        .input("updatedAt", sql.DateTime2(0), now)
-        .input("createdBy", sql.BigInt, idUsuarioActor)
-        .query(`
-          INSERT INTO [cfl].[RomanaEntregaDescarte] ([IdRomanaEntrega], [Activo], [Motivo], [FechaCreacion], [FechaActualizacion], [CreadoPor])
-          VALUES (@id, 1, @motivo, @createdAt, @updatedAt, @createdBy);
-        `);
+    for (const row of statusRows) {
+      const idRomanaEntrega = Number(row.IdRomanaEntrega);
+      if (row.hasDiscard) {
+        await new sql.Request(transaction)
+          .input("id", sql.BigInt, idRomanaEntrega)
+          .input("motivo", sql.VarChar(200), motivoFinal)
+          .input("updatedAt", sql.DateTime2(0), now)
+          .input("createdBy", sql.BigInt, idUsuarioActor)
+          .query(`
+            UPDATE [cfl].[RomanaEntregaDescarte]
+            SET Activo = 1, Motivo = @motivo, FechaActualizacion = @updatedAt, CreadoPor = @createdBy, FechaRestauracion = NULL, RestauradoPor = NULL
+            WHERE IdRomanaEntrega = @id;
+          `);
+      } else {
+        await new sql.Request(transaction)
+          .input("id", sql.BigInt, idRomanaEntrega)
+          .input("motivo", sql.VarChar(200), motivoFinal)
+          .input("createdAt", sql.DateTime2(0), now)
+          .input("updatedAt", sql.DateTime2(0), now)
+          .input("createdBy", sql.BigInt, idUsuarioActor)
+          .query(`
+            INSERT INTO [cfl].[RomanaEntregaDescarte] ([IdRomanaEntrega], [Activo], [Motivo], [FechaCreacion], [FechaActualizacion], [CreadoPor])
+            VALUES (@id, 1, @motivo, @createdAt, @updatedAt, @createdBy);
+          `);
+      }
     }
 
     await transaction.commit();
-    res.json({ message: "Entrega Romana descartada", data: { id_romana_entrega: idRomanaEntrega, activo: true, motivo: motivoFinal } });
+    res.json({
+      message: "Grupo de entregas Romana descartado",
+      data: { id_romana_entregas: ids, motivo: motivoFinal },
+    });
   } catch (error) {
     if (transaction) { try { await transaction.rollback(); } catch (_) { /* no-op */ } }
     next(error);
@@ -1744,6 +2089,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
   const body = req.body || {};
   const cabeceraIn = body.cabecera || {};
   const detallesIn = Array.isArray(body.detalles) ? body.detalles : [];
+  const transportIntent = body.transport || null;
 
   const idTipoFlete = parseRequiredBigInt(cabeceraIn.id_tipo_flete);
   const idCentroCostoInput = parseOptionalBigInt(cabeceraIn.id_centro_costo);
@@ -1751,12 +2097,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
   const requestedStatus = normalizeLifecycleStatus(cabeceraIn.estado);
   const fechaSalida = toNullableTrimmedString(cabeceraIn.fecha_salida);
   const horaSalida = toNullableTrimmedString(cabeceraIn.hora_salida);
-  const montoAplicadoRaw = cabeceraIn.monto_aplicado;
-  const montoAplicado = Number.isFinite(Number(montoAplicadoRaw)) ? Number(montoAplicadoRaw) : 0;
   const montoExtraRaw = cabeceraIn.monto_extra;
   const montoExtra = Number.isFinite(Number(montoExtraRaw)) ? Number(montoExtraRaw) : 0;
   const idDetalleViaje = parseOptionalBigInt(cabeceraIn.id_detalle_viaje);
-  const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
   const idCuentaMayorInput = parseOptionalBigInt(cabeceraIn.id_cuenta_mayor);
   const idImputacionFleteInput = parseOptionalBigInt(cabeceraIn.id_imputacion_flete);
   const idProductor = parseOptionalBigInt(cabeceraIn.id_productor);
@@ -1791,6 +2134,14 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
     await transaction.begin();
 
     const now = new Date();
+
+    // Transporte inteligente: crea/actualiza empresa/chofer/camion y opcionalmente recalc tarifa.
+    const transportResult = await applyTransportIntent(transaction, { cabeceraIn, transportIntent, now });
+    const idTarifa = parseOptionalBigInt(cabeceraIn.id_tarifa);
+    const montoAplicado = (cabeceraIn.monto_aplicado === null || cabeceraIn.monto_aplicado === undefined)
+      ? null
+      : (Number.isFinite(Number(cabeceraIn.monto_aplicado)) ? Number(cabeceraIn.monto_aplicado) : null);
+
     const imputacion = await resolveImputacionFlete(transaction, {
       idTipoFlete,
       idCentroCosto: idCentroCostoInput,
@@ -1953,7 +2304,9 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
     insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
     insertCabeceraReq.input("idTarifa", sql.BigInt, idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
-    insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_usuario_creador));
+    // Creador derivado del token. Nunca se acepta del body: el cliente no puede
+    // decidir quién "creó" el flete; lo dicta la sesión autenticada.
+    insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(req.authnClaims?.id_usuario));
     insertCabeceraReq.input("idTipoFlete", sql.BigInt, idTipoFlete);
     insertCabeceraReq.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("updatedAt", sql.DateTime2(0), now);
@@ -2092,6 +2445,15 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
       data: {
         id_cabecera_flete: idCabeceraFlete,
         id_sap_entrega: idSapEntrega,
+        resolved: {
+          id_empresa_transporte: cabeceraIn.id_empresa_transporte ?? null,
+          id_chofer: cabeceraIn.id_chofer ?? null,
+          id_camion: cabeceraIn.id_camion ?? null,
+          id_tarifa: idTarifa,
+          id_movil: idMovil,
+        },
+        warnings: transportResult.warnings,
+        tipo_camion_changed: transportResult.tipoCamionChanged,
       },
     });
   } catch (error) {

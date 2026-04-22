@@ -824,7 +824,7 @@ router.post("/productores/sync-sap", requirePermission("mantenedores.admin"), as
 
 router.post("/choferes/sync-sap", requirePermission("mantenedores.admin"), async (req, res, next) => {
   try {
-    const { syncChoferes } = require("../modules/sap-sync/sync-transport-catalogs");
+    const { syncChoferes } = require("../modules/sap-sync/sync-choferes");
     const result = await syncChoferes();
 
     req.auditContext = { entity: "mantenedores.choferes", action: "sync-sap" };
@@ -844,6 +844,22 @@ router.post("/camiones/sync-sap", requirePermission("mantenedores.admin"), async
     const result = await syncCamiones();
 
     req.auditContext = { entity: "mantenedores.camiones", action: "sync-sap" };
+
+    res.json({
+      message: `Sincronizacion completada: ${result.inserted} nuevos, ${result.updated} actualizados, ${result.unchanged} sin cambios`,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/empresas-transporte/sync-sap", requirePermission("mantenedores.admin"), async (req, res, next) => {
+  try {
+    const { syncEmpresasTransporte } = require("../modules/sap-sync/sync-empresas-transporte");
+    const result = await syncEmpresasTransporte();
+
+    req.auditContext = { entity: "mantenedores.empresas-transporte", action: "sync-sap" };
 
     res.json({
       message: `Sincronizacion completada: ${result.inserted} nuevos, ${result.updated} actualizados, ${result.unchanged} sin cambios`,

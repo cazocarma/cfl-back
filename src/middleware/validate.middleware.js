@@ -35,8 +35,15 @@ function validate(schemas) {
     }
 
     if (errors.length > 0) {
+      // Primer error como mensaje humano: "campo.anidado: mensaje específico".
+      // Permite que la UI muestre la causa exacta sin forzar al usuario a inspeccionar
+      // la consola. `details` se mantiene para casos avanzados.
+      const first = errors[0];
+      const human = first.path
+        ? `${first.path}: ${first.message}`
+        : first.message;
       return res.status(400).json({
-        error: "Error de validacion",
+        error: `Error de validación · ${human}`,
         details: errors,
       });
     }
