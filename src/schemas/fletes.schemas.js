@@ -1,4 +1,5 @@
 const { z } = require("zod");
+const { transportIntent } = require("./transport-intent.schema");
 
 const detalle = z.object({
   material: z.string().max(50).optional(),
@@ -44,6 +45,7 @@ const fleteManualBody = z.object({
     id_usuario_creador: z.coerce.number().int().positive().optional().nullable(),
   }),
   detalles: z.array(detalle).max(100, "Maximo 100 detalles por flete").default([]),
+  transport: transportIntent,
 });
 
 const fleteIdParam = z.object({

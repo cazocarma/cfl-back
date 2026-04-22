@@ -15,6 +15,7 @@ const {
   resolveMovilId,
   resolveImputacionFlete,
 } = require("../helpers");
+const { applyTransportIntent } = require("../modules/cfl-flete-save-pipeline");
 const { validate } = require("../middleware/validate.middleware");
 const { requirePermission } = require("../middleware/authz.middleware");
 const { fleteManualBody, fleteIdParam } = require("../schemas/fletes.schemas");
@@ -137,12 +138,30 @@ async function fetchCabecera(pool, idCabecera) {
       TarifaMontoFijo = tfa.MontoFijo,
       TarifaMoneda = tfa.Moneda,
       SapDestinatario = NULLIF(LTRIM(RTRIM(lk.SapDestinatario)), ''),
+      -- Hints de transporte desde SAP: permiten al modal sugerir empresa/chofer/camion
+      -- incluso cuando el flete fue guardado sin IdMovil. SapIdFiscalChofer alimenta
+      -- directamente el campo sap_id_fiscal del chofer pending_create (sin heurística
+      -- de regex sobre el nombre).
+      SapEmpresaTransporte = NULLIF(LTRIM(RTRIM(lk.SapEmpresaTransporte)), ''),
+      SapNombreChofer = NULLIF(LTRIM(RTRIM(lk.SapNombreChofer)), ''),
+      SapIdFiscalChofer = NULLIF(LTRIM(RTRIM(lk.SapIdFiscalChofer)), ''),
+      SapPatente = NULLIF(LTRIM(RTRIM(lk.SapPatente)), ''),
+      SapCarro = NULLIF(LTRIM(RTRIM(lk.SapCarro)), ''),
+      -- Hints de transporte desde Romana (fletes que vienen de Recepcion).
+      RomanaConductor = NULLIF(LTRIM(RTRIM(rc.Conductor)), ''),
+      RomanaPatente = NULLIF(LTRIM(RTRIM(rc.Patente)), ''),
+      RomanaCarro = NULLIF(LTRIM(RTRIM(rc.Carro)), ''),
       ProductorIdResuelto = COALESCE(cf.IdProductor, prod_sap.IdProductor),
       ProductorCodigoProveedor = COALESCE(prod_cf.CodigoProveedor, prod_sap.CodigoProveedor),
       ProductorRut = COALESCE(prod_cf.Rut, prod_sap.Rut),
       ProductorNombre = COALESCE(prod_cf.Nombre, prod_sap.Nombre),
-      ProductorEmail = COALESCE(prod_cf.Email, prod_sap.Email)
+      ProductorEmail = COALESCE(prod_cf.Email, prod_sap.Email),
+      UsuarioCreadorUsername = usr_creador.Username,
+      UsuarioCreadorEmail    = usr_creador.Email,
+      UsuarioCreadorNombre   = usr_creador.Nombre,
+      UsuarioCreadorApellido = usr_creador.Apellido
     FROM [cfl].[CabeceraFlete] cf
+    LEFT JOIN [cfl].[Usuario] usr_creador ON usr_creador.IdUsuario = cf.IdUsuarioCreador
     LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
     LEFT JOIN [cfl].[Camion] cam ON cam.IdCamion = mv.IdCamion
     LEFT JOIN [cfl].[Tarifa] tfa ON tfa.IdTarifa = cf.IdTarifa
@@ -162,6 +181,20 @@ async function fetchCabecera(pool, idCabecera) {
     LEFT JOIN [cfl].[VW_LikpActual] lk
       ON lk.SapNumeroEntrega = sap_rel.SapNumeroEntrega
      AND lk.SistemaFuente = sap_rel.SistemaFuente
+    OUTER APPLY (
+      SELECT TOP 1
+        re.NumeroPartida,
+        re.GuiaDespacho,
+        re.SistemaFuente
+      FROM [cfl].[FleteRomanaEntrega] fre
+      INNER JOIN [cfl].[RomanaEntrega] re ON re.IdRomanaEntrega = fre.IdRomanaEntrega
+      WHERE fre.IdCabeceraFlete = cf.IdCabeceraFlete
+      ORDER BY CASE WHEN fre.TipoRelacion = 'PRINCIPAL' THEN 0 ELSE 1 END, fre.IdFleteRomanaEntrega ASC
+    ) romana_rel
+    LEFT JOIN [cfl].[VW_RomanaCabeceraActual] rc
+      ON rc.NumeroPartida = romana_rel.NumeroPartida
+     AND rc.GuiaDespacho = romana_rel.GuiaDespacho
+     AND rc.SistemaFuente = romana_rel.SistemaFuente
     OUTER APPLY (
       SELECT TOP 1
         p.IdProductor,
@@ -255,10 +288,95 @@ async function fetchSapCurrentDetalles(pool, idCabecera) {
   return result.recordset;
 }
 
+async function fetchRomanaCurrentDetalles(pool, idCabecera) {
+  // Simétrico a fetchSapCurrentDetalles pero desde VW_RomanaDetalleActual. Se
+  // usa como fallback cuando el flete está vinculado a RomanaEntrega y no a SAP.
+  // IdEspecie se deriva directo del CodigoEspecie (el invariante del dominio
+  // dice que Especie.IdEspecie === Number(CodigoEspecie) sin ceros a la izquierda).
+  // Preservamos el IdEspecie guardado en DetalleFlete si existe (por row_num).
+  const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
+    ;WITH romana_source AS (
+      SELECT
+        fre.FechaCreacion AS BridgeFechaCreacion,
+        re.IdRomanaEntrega,
+        re.NumeroPartida,
+        re.GuiaDespacho,
+        re.SistemaFuente
+      FROM [cfl].[FleteRomanaEntrega] fre
+      INNER JOIN [cfl].[RomanaEntrega] re
+        ON re.IdRomanaEntrega = fre.IdRomanaEntrega
+      WHERE fre.IdCabeceraFlete = @idCabecera
+    ),
+    romana_positions AS (
+      SELECT
+        row_num = ROW_NUMBER() OVER (
+          ORDER BY
+            src.NumeroPartida ASC,
+            src.GuiaDespacho ASC,
+            TRY_CONVERT(INT, NULLIF(LTRIM(RTRIM(rd.Posicion)), '')),
+            rd.Posicion ASC
+        ),
+        src.BridgeFechaCreacion,
+        NumeroPartida = src.NumeroPartida,
+        GuiaDespacho = src.GuiaDespacho,
+        Posicion = NULLIF(LTRIM(RTRIM(rd.Posicion)), ''),
+        Material = NULLIF(LTRIM(RTRIM(rd.Material)), ''),
+        MaterialDescripcion = NULLIF(LTRIM(RTRIM(rd.MaterialDescripcion)), ''),
+        CodigoEspecie = NULLIF(LTRIM(RTRIM(rd.CodigoEspecie)), ''),
+        EspecieDescripcion = NULLIF(LTRIM(RTRIM(rd.EspecieDescripcion)), ''),
+        CantidadSubEnvaseL = rd.CantidadSubEnvaseL,
+        UnidadMedida = NULLIF(LTRIM(RTRIM(rd.UnidadMedida)), ''),
+        PesoReal = rd.PesoReal,
+        Lote = NULLIF(LTRIM(RTRIM(rd.Lote)), '')
+      FROM romana_source src
+      INNER JOIN [cfl].[VW_RomanaDetalleActual] rd
+        ON rd.SistemaFuente = src.SistemaFuente
+       AND rd.NumeroPartida = src.NumeroPartida
+       AND rd.GuiaDespacho = src.GuiaDespacho
+    ),
+    existing_details AS (
+      SELECT
+        row_num = ROW_NUMBER() OVER (ORDER BY IdDetalleFlete ASC),
+        IdEspecie
+      FROM [cfl].[DetalleFlete]
+      WHERE IdCabeceraFlete = @idCabecera
+    )
+    SELECT
+      IdDetalleFlete = rp.row_num,
+      IdCabeceraFlete = @idCabecera,
+      -- Prioridad: IdEspecie guardado en DetalleFlete; si no, derivado del CodigoEspecie.
+      IdEspecie = COALESCE(ed.IdEspecie, TRY_CONVERT(BIGINT, rp.CodigoEspecie)),
+      Material = rp.Material,
+      Descripcion = COALESCE(rp.MaterialDescripcion, rp.EspecieDescripcion),
+      Cantidad = rp.CantidadSubEnvaseL,
+      Unidad = CASE
+        WHEN rp.UnidadMedida IS NULL THEN NULL
+        ELSE LEFT(rp.UnidadMedida, 3)
+      END,
+      Peso = rp.PesoReal,
+      FechaCreacion = rp.BridgeFechaCreacion,
+      RomanaNumeroPartida = rp.NumeroPartida,
+      RomanaGuiaDespacho = rp.GuiaDespacho,
+      RomanaPosicion = rp.Posicion,
+      RomanaLote = rp.Lote
+    FROM romana_positions rp
+    LEFT JOIN existing_details ed
+      ON ed.row_num = rp.row_num
+    ORDER BY rp.row_num ASC;
+  `);
+
+  return result.recordset;
+}
+
 async function fetchDetalles(pool, idCabecera) {
   const sapCurrentDetalles = await fetchSapCurrentDetalles(pool, idCabecera);
   if (sapCurrentDetalles.length > 0) {
     return sapCurrentDetalles;
+  }
+
+  const romanaCurrentDetalles = await fetchRomanaCurrentDetalles(pool, idCabecera);
+  if (romanaCurrentDetalles.length > 0) {
+    return romanaCurrentDetalles;
   }
 
   const result = await pool.request().input("idCabecera", sql.BigInt, idCabecera).query(`
@@ -299,7 +417,7 @@ router.get("/:id_cabecera_flete", requirePermission("fletes.candidatos.view", "f
 });
 
 router.post("/manual", requirePermission("fletes.crear"), validate({ body: fleteManualBody }), async (req, res, next) => {
-  const { cabecera: cabeceraIn, detalles: detallesIn } = req.body;
+  const { cabecera: cabeceraIn, detalles: detallesIn, transport: transportIntent } = req.body;
   const parsed = parseFleteInput(cabeceraIn);
   if (!validateFleteInput(parsed, res)) return;
 
@@ -311,6 +429,14 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
     await transaction.begin();
 
     const now = new Date();
+
+    // Transporte inteligente: crea/actualiza empresa/chofer/camion y opcionalmente
+    // recalcula tarifa. Muta cabeceraIn con los ids resueltos y tarifa recalculada.
+    const transportResult = await applyTransportIntent(transaction, { cabeceraIn, transportIntent, now });
+    // Re-parsear para que parsed.idTarifa, parsed.montoAplicado reflejen los cambios
+    // aplicados por applyTransportIntent (puede haber sobreescrito id_tarifa/monto_aplicado).
+    Object.assign(parsed, parseFleteInput(cabeceraIn));
+
     const imputacion = await resolveImputacionFlete(transaction, {
       idTipoFlete: parsed.idTipoFlete,
       idCentroCosto: parsed.idCentroCostoInput,
@@ -362,7 +488,9 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
     insertCabeceraReq.input("idMovil", sql.BigInt, idMovil);
     insertCabeceraReq.input("idTarifa", sql.BigInt, parsed.idTarifa);
     insertCabeceraReq.input("observaciones", sql.VarChar(200), toNullableTrimmedString(cabeceraIn.observaciones));
-    insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(cabeceraIn.id_usuario_creador));
+    // Creador derivado del token. Nunca se acepta del body: el cliente no puede
+    // decidir quién "creó" el flete; lo dicta la sesión autenticada.
+    insertCabeceraReq.input("idUsuarioCreador", sql.BigInt, parseOptionalBigInt(req.authnClaims?.id_usuario));
     insertCabeceraReq.input("idTipoFlete", sql.BigInt, parsed.idTipoFlete);
     insertCabeceraReq.input("createdAt", sql.DateTime2(0), now);
     insertCabeceraReq.input("updatedAt", sql.DateTime2(0), now);
@@ -439,6 +567,15 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
       message: "Flete manual creado",
       data: {
         id_cabecera_flete: idCabeceraFlete,
+        resolved: {
+          id_empresa_transporte: cabeceraIn.id_empresa_transporte ?? null,
+          id_chofer: cabeceraIn.id_chofer ?? null,
+          id_camion: cabeceraIn.id_camion ?? null,
+          id_tarifa: parsed.idTarifa,
+          id_movil: idMovil,
+        },
+        warnings: transportResult.warnings,
+        tipo_camion_changed: transportResult.tipoCamionChanged,
       },
     });
   } catch (error) {
@@ -449,7 +586,7 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
 
 router.put("/:id_cabecera_flete", requirePermission("fletes.editar"), validate({ params: fleteIdParam, body: fleteManualBody }), async (req, res, next) => {
   const idCabecera = req.params.id_cabecera_flete;
-  const { cabecera: cabeceraIn, detalles: detallesIn } = req.body;
+  const { cabecera: cabeceraIn, detalles: detallesIn, transport: transportIntent } = req.body;
   const parsed = parseFleteInput(cabeceraIn);
   if (!validateFleteInput(parsed, res)) return;
 
@@ -483,9 +620,17 @@ router.put("/:id_cabecera_flete", requirePermission("fletes.editar"), validate({
       return;
     }
 
+    // Transporte inteligente: crea/actualiza empresa/chofer/camion y opcionalmente
+    // recalcula tarifa. Muta cabeceraIn.
+    const transportResult = await applyTransportIntent(transaction, { cabeceraIn, transportIntent, now });
+    Object.assign(parsed, parseFleteInput(cabeceraIn));
+
     const idDetalleViaje = parsed.idDetalleViaje ?? existing.IdDetalleViaje ?? null;
     const idProductor = parsed.idProductor ?? existing.IdProductor ?? null;
-    const idTarifa = parsed.idTarifa ?? existing.IdTarifa ?? null;
+    // Si applyTransportIntent recalculo tarifa, parsed.idTarifa ya refleja el nuevo valor
+    // (o null si no hubo match). Si no recalculo, cae al existing.IdTarifa como fallback.
+    const recalculoTarifa = transportIntent?.recalc_tarifa === true || transportResult.tipoCamionChanged;
+    const idTarifa = recalculoTarifa ? parsed.idTarifa : (parsed.idTarifa ?? existing.IdTarifa ?? null);
     const imputacion = await resolveImputacionFlete(transaction, {
       idTipoFlete: parsed.idTipoFlete,
       idCentroCosto: parsed.idCentroCostoInput ?? existing.IdCentroCosto ?? null,
@@ -584,7 +729,12 @@ router.put("/:id_cabecera_flete", requirePermission("fletes.editar"), validate({
 
     res.json({
       message: "Flete actualizado",
-      data: { cabecera: updatedCabecera, detalles: updatedDetalles },
+      data: {
+        cabecera: updatedCabecera,
+        detalles: updatedDetalles,
+        warnings: transportResult.warnings,
+        tipo_camion_changed: transportResult.tipoCamionChanged,
+      },
     });
   } catch (error) {
     await safeRollback(transaction);

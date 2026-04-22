@@ -360,7 +360,9 @@ const MAINTAINERS = {
     alias: "t",
     idColumn: "IdChofer",
     orderBy: "t.SapNombre ASC",
-    listColumns: ["t.IdChofer", "t.SapIdFiscal", "t.SapNombre", "t.Telefono", "t.Activo"],
+    // SapIdFiscalNorm se incluye para habilitar busqueda tolerante
+    // en el frontend (no se renderiza como columna visible).
+    listColumns: ["t.IdChofer", "t.SapIdFiscal", "t.SapIdFiscalNorm", "t.SapNombre", "t.Telefono", "t.Activo"],
     create: {
       required: ["SapIdFiscal", "SapNombre"],
       optional: ["Telefono", "Activo"]
