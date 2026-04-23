@@ -63,6 +63,9 @@ async function computePreview(pool, idEmpresa, grupos) {
         cf.IdCentroCosto,
         cc.nombre  AS centro_costo,
         cc.SapCodigo AS centro_costo_codigo,
+        cf.IdTemporada,
+        temporada_codigo = t.Codigo,
+        temporada_nombre = t.Nombre,
         ruta = COALESCE(r.NombreRuta,
           CASE WHEN no.nombre IS NOT NULL OR nd.nombre IS NOT NULL
             THEN CONCAT(COALESCE(no.nombre,'Origen'), ' -> ', COALESCE(nd.nombre,'Destino'))
@@ -78,6 +81,7 @@ async function computePreview(pool, idEmpresa, grupos) {
       FROM [cfl].[CabeceraFlete] cf
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[Temporada] t ON t.IdTemporada = cf.IdTemporada
       LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
       LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
@@ -181,6 +185,9 @@ async function fetchFactura(pool, idFactura) {
         cf.IdCentroCosto,
         centro_costo       = cc.nombre,
         centro_costo_codigo = cc.SapCodigo,
+        cf.IdTemporada,
+        temporada_codigo   = t.Codigo,
+        temporada_nombre   = t.Nombre,
         ruta_nombre        = r.NombreRuta,
         origen_nombre      = no.nombre,
         destino_nombre     = nd.nombre,
@@ -200,6 +207,7 @@ async function fetchFactura(pool, idFactura) {
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
       LEFT JOIN [cfl].[CuentaMayor] cm ON cm.IdCuentaMayor = cf.IdCuentaMayor
+      LEFT JOIN [cfl].[Temporada] t ON t.IdTemporada = cf.IdTemporada
       LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[EmpresaTransporte] emp ON emp.IdEmpresa = mv.IdEmpresaTransporte
       LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
@@ -409,6 +417,9 @@ router.get('/movimientos-elegibles', requirePermission("facturas.ver", "facturas
         cf.IdCentroCosto,
         cc.nombre  AS centro_costo,
         cc.SapCodigo AS centro_costo_codigo,
+        cf.IdTemporada,
+        temporada_codigo = t.Codigo,
+        temporada_nombre = t.Nombre,
         FechaSalida = CONVERT(VARCHAR(10), cf.FechaSalida, 23),
         cf.MontoAplicado,
         cf.MontoExtra
@@ -416,6 +427,7 @@ router.get('/movimientos-elegibles', requirePermission("facturas.ver", "facturas
       INNER JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[Temporada] t ON t.IdTemporada = cf.IdTemporada
       WHERE mv.IdEmpresaTransporte = @idEmpresa
         AND UPPER(cf.estado) = 'COMPLETADO'
         AND cf.IdFactura IS NULL

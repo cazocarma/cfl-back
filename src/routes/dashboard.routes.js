@@ -17,6 +17,7 @@ const {
 const {
   resolveMovilId,
   resolveImputacionFlete,
+  getIdTemporadaActiva,
 } = require("../helpers");
 const { applyTransportIntent } = require("../modules/cfl-flete-save-pipeline");
 
@@ -1066,6 +1067,7 @@ router.post("/fletes/no-ingresados/romana/crear", requirePermission("fletes.crea
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
     const idProductor = idProductorInput
       || await resolveProductorIdByDestinatario(transaction, null, grupo.CodigoProductor);
+    const idTemporada = await getIdTemporadaActiva(transaction);
 
     const estado = deriveLifecycleStatus({
       requestedStatus,
@@ -1083,6 +1085,7 @@ router.post("/fletes/no-ingresados/romana/crear", requirePermission("fletes.crea
     // SapNumeroEntrega=NULL: una cabecera multi-partida no tiene un único
     // número de partida; la identidad del flete es la guía del camión.
     const insertReq = new sql.Request(transaction);
+    insertReq.input("idTemporada", sql.BigInt, idTemporada);
     insertReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
     insertReq.input("sapNumeroEntrega", sql.VarChar(20), null);
     insertReq.input("sapCodigoTipoFlete", sql.Char(4), null);
@@ -1115,6 +1118,7 @@ router.post("/fletes/no-ingresados/romana/crear", requirePermission("fletes.crea
 
     const cabeceraResult = await insertReq.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
+        [IdTemporada],
         [IdDetalleViaje], [SapNumeroEntrega], [SapCodigoTipoFlete],
         [SapCentroCosto], [SapCuentaMayor], [SapGuiaRemision],
         [GuiaRemision], [NumeroEntrega], [IdProductor],
@@ -1126,6 +1130,7 @@ router.post("/fletes/no-ingresados/romana/crear", requirePermission("fletes.crea
       )
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
+        @idTemporada,
         @idDetalleViaje, @sapNumeroEntrega, @sapCodigoTipoFlete,
         @sapCentroCosto, @sapCuentaMayor, @sapGuiaRemision,
         @guiaRemision, @numeroEntrega, @idProductor,
@@ -1400,6 +1405,9 @@ router.get("/fletes/completados", requirePermission("fletes.candidatos.view"), a
         tipo_flete_activo = tf.Activo,
         cf.IdCentroCosto,
         cc.Nombre AS centro_costo_nombre,
+        cf.IdTemporada,
+        temporada_codigo = t.Codigo,
+        temporada_nombre = t.Nombre,
         det.total_detalles,
         cf.FechaCreacion,
         cf.FechaActualizacion,
@@ -1452,6 +1460,7 @@ router.get("/fletes/completados", requirePermission("fletes.candidatos.view"), a
       FROM [cfl].[CabeceraFlete] cf
       LEFT JOIN [cfl].[TipoFlete] tf ON tf.IdTipoFlete = cf.IdTipoFlete
       LEFT JOIN [cfl].[CentroCosto] cc ON cc.IdCentroCosto = cf.IdCentroCosto
+      LEFT JOIN [cfl].[Temporada] t ON t.IdTemporada = cf.IdTemporada
       LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
       LEFT JOIN [cfl].[EmpresaTransporte] et ON et.IdEmpresa = mv.IdEmpresaTransporte
       LEFT JOIN [cfl].[Chofer] ch ON ch.IdChofer = mv.IdChofer
@@ -2278,8 +2287,10 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
       idProductor,
       entrega.SapDestinatario
     );
+    const idTemporada = await getIdTemporadaActiva(transaction);
 
     const insertCabeceraReq = new sql.Request(transaction);
+    insertCabeceraReq.input("idTemporada", sql.BigInt, idTemporada);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, idDetalleViaje);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), entrega.sap_numero_entrega);
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFleteSug ? sapTipoFleteSug.slice(0, 4) : null);
@@ -2314,6 +2325,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
 
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
+        [IdTemporada],
         [IdDetalleViaje],
         [SapNumeroEntrega],
         [SapCodigoTipoFlete],
@@ -2343,6 +2355,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/crear", requirePermission("fl
       )
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
+        @idTemporada,
         @idDetalleViaje,
         @sapNumeroEntrega,
         @sapCodigoTipoFlete,
@@ -2608,6 +2621,8 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
       null,
       delivery.SapDestinatario
     );
+    const idTemporada = await getIdTemporadaActiva(transaction);
+    insertCabeceraRequest.input("idTemporada", sql.BigInt, idTemporada);
     insertCabeceraRequest.input("sapNumeroEntrega", sql.VarChar(20), delivery.sap_numero_entrega);
     insertCabeceraRequest.input("sapCodigoTipoFlete", sql.Char(4), sapTipoFlete.slice(0, 4));
     insertCabeceraRequest.input("sapCentroCosto", sql.Char(10), sapCentroCosto ? sapCentroCosto.slice(0, 10) : null);
@@ -2629,6 +2644,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
 
     const cabeceraResult = await insertCabeceraRequest.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
+        [IdTemporada],
         [SapNumeroEntrega],
         [SapCodigoTipoFlete],
         [SapCentroCosto],
@@ -2650,6 +2666,7 @@ router.post("/fletes/no-ingresados/:id_sap_entrega/ingresar", requirePermission(
       )
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
+        @idTemporada,
         @sapNumeroEntrega,
         @sapCodigoTipoFlete,
         @sapCentroCosto,
