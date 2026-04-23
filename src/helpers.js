@@ -236,10 +236,31 @@ async function resolveImputacionFlete(transaction, {
   );
 }
 
+/**
+ * Retorna el IdTemporada de la única temporada activa. Falla con 422 si no existe
+ * ninguna. La unicidad está garantizada por índice filtrado en BD.
+ */
+async function getIdTemporadaActiva(transaction) {
+  const result = await new sql.Request(transaction).query(`
+    SELECT TOP 1 IdTemporada
+    FROM [cfl].[Temporada]
+    WHERE Activa = 1;
+  `);
+  const idTemporada = result.recordset[0]?.IdTemporada;
+  if (!idTemporada) {
+    throw buildDomainError(
+      "No hay temporada activa. Active una temporada antes de crear fletes.",
+      422,
+    );
+  }
+  return Number(idTemporada);
+}
+
 module.exports = {
   buildDomainError,
   resolveMovilId,
   resolveImputacionFlete,
+  getIdTemporadaActiva,
   // Re-exports for convenience (use direct imports from utils/ for new code)
   LIFECYCLE_STATUS,
 };

@@ -14,6 +14,7 @@ const {
 const {
   resolveMovilId,
   resolveImputacionFlete,
+  getIdTemporadaActiva,
 } = require("../helpers");
 const { applyTransportIntent } = require("../modules/cfl-flete-save-pipeline");
 const { validate } = require("../middleware/validate.middleware");
@@ -159,9 +160,12 @@ async function fetchCabecera(pool, idCabecera) {
       UsuarioCreadorUsername = usr_creador.Username,
       UsuarioCreadorEmail    = usr_creador.Email,
       UsuarioCreadorNombre   = usr_creador.Nombre,
-      UsuarioCreadorApellido = usr_creador.Apellido
+      UsuarioCreadorApellido = usr_creador.Apellido,
+      TemporadaCodigo = t.Codigo,
+      TemporadaNombre = t.Nombre
     FROM [cfl].[CabeceraFlete] cf
     LEFT JOIN [cfl].[Usuario] usr_creador ON usr_creador.IdUsuario = cf.IdUsuarioCreador
+    LEFT JOIN [cfl].[Temporada] t ON t.IdTemporada = cf.IdTemporada
     LEFT JOIN [cfl].[Movil] mv ON mv.IdMovil = cf.IdMovil
     LEFT JOIN [cfl].[Camion] cam ON cam.IdCamion = mv.IdCamion
     LEFT JOIN [cfl].[Tarifa] tfa ON tfa.IdTarifa = cf.IdTarifa
@@ -457,6 +461,7 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
     }
 
     const idMovil = await resolveMovilId(transaction, cabeceraIn, now);
+    const idTemporada = await getIdTemporadaActiva(transaction);
     const estado = deriveLifecycleStatus({
       requestedStatus: parsed.requestedStatus,
       idTipoFlete: parsed.idTipoFlete,
@@ -468,6 +473,7 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
     });
 
     const insertCabeceraReq = new sql.Request(transaction);
+    insertCabeceraReq.input("idTemporada", sql.BigInt, idTemporada);
     insertCabeceraReq.input("idDetalleViaje", sql.BigInt, parsed.idDetalleViaje);
     insertCabeceraReq.input("sapNumeroEntrega", sql.VarChar(20), toNullableTrimmedString(cabeceraIn.sap_numero_entrega));
     insertCabeceraReq.input("sapCodigoTipoFlete", sql.Char(4), toNullableTrimmedString(cabeceraIn.sap_codigo_tipo_flete));
@@ -499,6 +505,7 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
 
     const cabeceraResult = await insertCabeceraReq.query(`
       INSERT INTO [cfl].[CabeceraFlete] (
+        [IdTemporada],
         [IdDetalleViaje],
         [SapNumeroEntrega],
         [SapCodigoTipoFlete],
@@ -528,6 +535,7 @@ router.post("/manual", requirePermission("fletes.crear"), validate({ body: flete
       )
       OUTPUT INSERTED.IdCabeceraFlete
       VALUES (
+        @idTemporada,
         @idDetalleViaje,
         @sapNumeroEntrega,
         @sapCodigoTipoFlete,
